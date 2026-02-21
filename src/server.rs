@@ -1,4 +1,6 @@
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -7,8 +9,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::actions;
@@ -24,16 +28,52 @@ const MAX_BODY_SIZE: usize = 256 * 1024;
 /// Max number of delivery IDs to track for replay protection.
 const MAX_SEEN_DELIVERIES: usize = 10_000;
 
+/// Max number of recent events to keep.
+const MAX_RECENT_EVENTS: usize = 100;
+
 /// Shared state across all routes.
 pub struct SharedState {
-    pub rules: Vec<RuleConfig>,
+    pub rules: RwLock<Vec<RuleConfig>>,
     pub claude: Option<ClaudeConfig>,
     pub github_token_env: String,
     pub github_app: Option<GitHubAppAuth>,
     pub http_client: reqwest::Client,
     pub webhook_count: usize,
+    pub config_path: PathBuf,
+    pub stats: ServerStats,
+    pub recent_events: Mutex<VecDeque<RecentEvent>>,
     /// Recently seen delivery IDs for replay protection.
     pub seen_deliveries: Mutex<DeliveryTracker>,
+}
+
+/// Server-wide counters. Atomics — no locks needed for reads.
+pub struct ServerStats {
+    pub started_at: DateTime<Utc>,
+    pub events_received: AtomicU64,
+    pub events_matched: AtomicU64,
+    pub actions_succeeded: AtomicU64,
+    pub actions_failed: AtomicU64,
+}
+
+impl ServerStats {
+    pub fn new() -> Self {
+        Self {
+            started_at: Utc::now(),
+            events_received: AtomicU64::new(0),
+            events_matched: AtomicU64::new(0),
+            actions_succeeded: AtomicU64::new(0),
+            actions_failed: AtomicU64::new(0),
+        }
+    }
+}
+
+/// A recently processed event for the MCP facade.
+#[derive(Clone, Serialize)]
+pub struct RecentEvent {
+    pub event_type: String,
+    pub source: String,
+    pub matched_rules: Vec<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Bounded set of recently seen delivery IDs.
@@ -88,7 +128,7 @@ struct WebhookState {
     webhook: Arc<WebhookConfig>,
 }
 
-pub fn build_router(config: crate::config::Config) -> Router {
+pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Router {
     let http_client = reqwest::Client::new();
 
     let github_token_env = config
@@ -124,11 +164,14 @@ pub fn build_router(config: crate::config::Config) -> Router {
 
     let shared = Arc::new(SharedState {
         webhook_count: config.webhooks.len(),
-        rules: config.rules,
+        rules: RwLock::new(config.rules),
         claude: config.claude,
         github_token_env,
         github_app,
         http_client,
+        config_path,
+        stats: ServerStats::new(),
+        recent_events: Mutex::new(VecDeque::new()),
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
     });
 
@@ -139,9 +182,10 @@ pub fn build_router(config: crate::config::Config) -> Router {
             get({
                 let shared = shared.clone();
                 move || async move {
+                    let rules_count = shared.rules.read().await.len();
                     axum::Json(json!({
                         "webhooks": shared.webhook_count,
-                        "rules": shared.rules.len(),
+                        "rules": rules_count,
                     }))
                 }
             }),
@@ -176,6 +220,9 @@ pub fn build_router(config: crate::config::Config) -> Router {
                 .with_state(wh_state),
         );
     }
+
+    // Mount MCP management endpoint
+    router = crate::mcp::mount(router, shared);
 
     router
 }
@@ -232,12 +279,19 @@ async fn handle_webhook(
         "received webhook event"
     );
 
+    state.shared.stats.events_received.fetch_add(1, Ordering::Relaxed);
+
     // Match rules and dispatch
-    let matched = match_rules(&event, &state.shared.rules);
+    let rules = state.shared.rules.read().await;
+    let matched = match_rules(&event, &rules);
     if matched.is_empty() {
         info!(event_type = %event.type_, "no rules matched");
         return Ok(axum::Json(json!({"matched_rules": 0})));
     }
+
+    state.shared.stats.events_matched.fetch_add(1, Ordering::Relaxed);
+
+    let matched_names: Vec<String> = matched.iter().map(|r| r.name.clone()).collect();
 
     info!(
         event_type = %event.type_,
@@ -257,11 +311,29 @@ async fn handle_webhook(
         )
         .await
         {
+            state.shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
             error!(rule = %rule.name, error = %e, "action failed");
+        } else {
+            state.shared.stats.actions_succeeded.fetch_add(1, Ordering::Relaxed);
         }
     }
+    // Drop the read lock before acquiring the mutex
+    drop(rules);
 
-    Ok(axum::Json(json!({"matched_rules": matched.len()})))
+    // Record recent event
+    let mut recent = state.shared.recent_events.lock().await;
+    if recent.len() >= MAX_RECENT_EVENTS {
+        recent.pop_front();
+    }
+    recent.push_back(RecentEvent {
+        event_type: event.type_.clone(),
+        source: event.source.clone(),
+        matched_rules: matched_names.clone(),
+        timestamp: event.time,
+    });
+    drop(recent);
+
+    Ok(axum::Json(json!({"matched_rules": matched_names.len()})))
 }
 
 fn verify_request(

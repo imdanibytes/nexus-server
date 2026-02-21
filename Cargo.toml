@@ -24,3 +24,9 @@ dotenvy = "0.15"
 ngrok = "0.18"
 futures = "0.3"
 jsonwebtoken = "9"
+tokio-util = "0.7"
+rmcp = { version = "0.15", features = [
+    "server",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+] }

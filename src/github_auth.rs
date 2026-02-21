@@ -85,6 +85,11 @@ impl GitHubAppAuth {
         Ok(token)
     }
 
+    /// Force-refresh the cached installation token, bypassing the cache TTL.
+    pub async fn force_refresh(&self) -> Result<String, AuthError> {
+        self.refresh_token().await
+    }
+
     fn generate_jwt(&self) -> Result<String, AuthError> {
         let now = chrono::Utc::now().timestamp();
         let claims = JwtClaims {
