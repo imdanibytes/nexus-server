@@ -1,0 +1,34 @@
+[server]
+bind = "0.0.0.0:8090"
+
+[claude]
+api_key_env = "ANTHROPIC_API_KEY"   # reads from this env var at runtime
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[[webhooks]]
+id = "github-main"
+path = "/hook/github"
+event_type_prefix = "com.github"
+verification = { method = "github-hmac", secret_env = "GITHUB_WEBHOOK_SECRET" }
+
+[[rules]]
+name = "New issues → Claude triage"
+filter = { type_prefix = "com.github.issues.opened" }
+action = "claude"
+prompt = """
+A new issue was opened in {{event.data.repository.full_name}}:
+
+Title: {{event.data.issue.title}}
+Body: {{event.data.issue.body}}
+Author: {{event.data.issue.user.login}}
+
+Triage this issue: classify it (bug/feature/question), assess priority, and suggest a brief implementation approach.
+"""
+
+[[rules]]
+name = "Push notifications → HTTP"
+filter = { type_prefix = "com.github.push" }
+action = "http_post"
+url = "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+body_template = '{"text": "Push to {{event.data.repository.name}} by {{event.data.pusher.name}}: {{event.data.head_commit.message}}"}'
