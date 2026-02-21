@@ -8,6 +8,8 @@ pub struct Config {
     #[serde(default)]
     pub claude: Option<ClaudeConfig>,
     #[serde(default)]
+    pub github: Option<GithubConfig>,
+    #[serde(default)]
     pub webhooks: Vec<WebhookConfig>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
@@ -82,9 +84,21 @@ pub struct RuleConfig {
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub body_template: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GithubConfig {
+    #[serde(default = "default_github_token_env")]
+    pub token_env: String,
+}
+
+fn default_github_token_env() -> String {
+    "GITHUB_TOKEN".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]

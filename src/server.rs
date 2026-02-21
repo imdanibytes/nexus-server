@@ -19,6 +19,7 @@ use crate::verification;
 struct SharedState {
     rules: Vec<RuleConfig>,
     claude: Option<ClaudeConfig>,
+    github_token_env: String,
     http_client: reqwest::Client,
     webhook_count: usize,
 }
@@ -31,10 +32,17 @@ struct WebhookState {
 }
 
 pub fn build_router(config: crate::config::Config) -> Router {
+    let github_token_env = config
+        .github
+        .as_ref()
+        .map(|g| g.token_env.clone())
+        .unwrap_or_else(|| "GITHUB_TOKEN".to_string());
+
     let shared = Arc::new(SharedState {
         webhook_count: config.webhooks.len(),
         rules: config.rules,
         claude: config.claude,
+        github_token_env,
         http_client: reqwest::Client::new(),
     });
 
@@ -126,6 +134,7 @@ async fn handle_webhook(
             rule,
             &event,
             claude_config,
+            &state.shared.github_token_env,
             &state.shared.http_client,
         )
         .await

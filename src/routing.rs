@@ -58,6 +58,7 @@ mod tests {
             },
             action: action.to_string(),
             prompt: None,
+            system_prompt: None,
             url: None,
             body_template: None,
         }

@@ -1,4 +1,5 @@
 mod actions;
+mod agent;
 mod cloud_event;
 mod config;
 mod routing;
