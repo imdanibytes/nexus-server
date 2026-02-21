@@ -77,6 +77,11 @@ pub fn github_tool_definitions() -> Vec<Value> {
                             "properties": {
                                 "path": { "type": "string", "description": "File path relative to repo root" },
                                 "line": { "type": "integer", "description": "Line number in the diff to comment on" },
+                                "side": {
+                                    "type": "string",
+                                    "enum": ["LEFT", "RIGHT"],
+                                    "description": "Which side of the diff (LEFT=original, RIGHT=modified). Default: RIGHT"
+                                },
                                 "body": { "type": "string", "description": "Comment body (markdown)" }
                             },
                             "required": ["path", "line", "body"]
@@ -101,7 +106,7 @@ pub fn github_tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "get_review_comments",
-            "description": "Get all review comments on a pull request. Returns comment id, path, line, body, user, and in_reply_to for threading.",
+            "description": "Get all review comments on a pull request. Returns comment id, path, line, body, user, and in_reply_to_id for threading.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -295,7 +300,8 @@ async fn create_review(
                 let path = c["path"].as_str()?;
                 let line = c["line"].as_i64()?;
                 let body = c["body"].as_str()?;
-                Some(json!({ "path": path, "line": line, "body": body }))
+                let side = c["side"].as_str().unwrap_or("RIGHT");
+                Some(json!({ "path": path, "line": line, "side": side, "body": body }))
             })
             .collect();
         if !inline.is_empty() {
@@ -360,25 +366,39 @@ async fn get_review_comments(
     let repo = input["repo"].as_str().ok_or("missing repo")?;
     let number = input["pull_number"].as_i64().ok_or("missing pull_number")?;
 
-    let resp = client
-        .get(github_api(&format!(
-            "/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100"
-        )))
-        .header("authorization", format!("Bearer {token}"))
-        .header("user-agent", "nexus-server")
-        .header("accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let per_page = 100;
+    let mut page = 1u32;
+    let mut all_comments: Vec<Value> = Vec::new();
 
-    let status = resp.status().as_u16();
-    if status != 200 {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub API {status}: {body}"));
+    loop {
+        let resp = client
+            .get(github_api(&format!(
+                "/repos/{owner}/{repo}/pulls/{number}/comments?per_page={per_page}&page={page}"
+            )))
+            .header("authorization", format!("Bearer {token}"))
+            .header("user-agent", "nexus-server")
+            .header("accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("GitHub API {status}: {body}"));
+        }
+
+        let batch: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+        let count = batch.len();
+        all_comments.extend(batch);
+
+        if count < per_page {
+            break;
+        }
+        page += 1;
     }
 
-    let comments: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
-    let summary: Vec<Value> = comments
+    let summary: Vec<Value> = all_comments
         .iter()
         .map(|c| {
             json!({
