@@ -56,7 +56,7 @@ pub fn github_tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "create_review",
-            "description": "Submit a review on a GitHub pull request.",
+            "description": "Submit a review on a GitHub pull request, optionally with inline comments on specific lines.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -68,6 +68,19 @@ pub fn github_tool_definitions() -> Vec<Value> {
                         "type": "string",
                         "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
                         "description": "Review action"
+                    },
+                    "comments": {
+                        "type": "array",
+                        "description": "Inline comments on specific lines of the diff",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "File path relative to repo root" },
+                                "line": { "type": "integer", "description": "Line number in the diff to comment on" },
+                                "body": { "type": "string", "description": "Comment body (markdown)" }
+                            },
+                            "required": ["path", "line", "body"]
+                        }
                     }
                 },
                 "required": ["owner", "repo", "pull_number", "body", "event"]
@@ -82,6 +95,52 @@ pub fn github_tool_definitions() -> Vec<Value> {
                     "owner": { "type": "string", "description": "Repository owner" },
                     "repo": { "type": "string", "description": "Repository name" },
                     "pull_number": { "type": "integer", "description": "PR number" }
+                },
+                "required": ["owner", "repo", "pull_number"]
+            }
+        }),
+        json!({
+            "name": "get_review_comments",
+            "description": "Get all review comments on a pull request. Returns comment id, path, line, body, user, and in_reply_to for threading.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string", "description": "Repository owner" },
+                    "repo": { "type": "string", "description": "Repository name" },
+                    "pull_number": { "type": "integer", "description": "PR number" }
+                },
+                "required": ["owner", "repo", "pull_number"]
+            }
+        }),
+        json!({
+            "name": "reply_to_review_comment",
+            "description": "Reply to a review comment thread on a pull request.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string", "description": "Repository owner" },
+                    "repo": { "type": "string", "description": "Repository name" },
+                    "pull_number": { "type": "integer", "description": "PR number" },
+                    "comment_id": { "type": "integer", "description": "ID of the comment to reply to" },
+                    "body": { "type": "string", "description": "Reply body (markdown)" }
+                },
+                "required": ["owner", "repo", "pull_number", "comment_id", "body"]
+            }
+        }),
+        json!({
+            "name": "merge_pull_request",
+            "description": "Merge a pull request.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string", "description": "Repository owner" },
+                    "repo": { "type": "string", "description": "Repository name" },
+                    "pull_number": { "type": "integer", "description": "PR number" },
+                    "merge_method": {
+                        "type": "string",
+                        "enum": ["merge", "squash", "rebase"],
+                        "description": "Merge method (default: squash)"
+                    }
                 },
                 "required": ["owner", "repo", "pull_number"]
             }
@@ -102,6 +161,9 @@ pub async fn execute(
         "close_issue" => close_issue(input, client, github_token).await,
         "create_review" => create_review(input, client, github_token).await,
         "get_pull_request_diff" => get_pr_diff(input, client, github_token).await,
+        "get_review_comments" => get_review_comments(input, client, github_token).await,
+        "reply_to_review_comment" => reply_to_review_comment(input, client, github_token).await,
+        "merge_pull_request" => merge_pull_request(input, client, github_token).await,
         _ => Err(format!("unknown tool: {name}")),
     };
 
@@ -224,12 +286,29 @@ async fn create_review(
     let body = input["body"].as_str().ok_or("missing body")?;
     let event = input["event"].as_str().ok_or("missing event")?;
 
+    let mut payload = json!({ "body": body, "event": event });
+
+    if let Some(comments) = input["comments"].as_array() {
+        let inline: Vec<Value> = comments
+            .iter()
+            .filter_map(|c| {
+                let path = c["path"].as_str()?;
+                let line = c["line"].as_i64()?;
+                let body = c["body"].as_str()?;
+                Some(json!({ "path": path, "line": line, "body": body }))
+            })
+            .collect();
+        if !inline.is_empty() {
+            payload["comments"] = json!(inline);
+        }
+    }
+
     let resp = client
         .post(github_api(&format!("/repos/{owner}/{repo}/pulls/{number}/reviews")))
         .header("authorization", format!("Bearer {token}"))
         .header("user-agent", "nexus-server")
         .header("accept", "application/vnd.github+json")
-        .json(&json!({ "body": body, "event": event }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -237,6 +316,114 @@ async fn create_review(
     let status = resp.status().as_u16();
     if status == 200 {
         Ok(format!("Review ({event}) submitted on {owner}/{repo}#{number}"))
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("GitHub API {status}: {body}"))
+    }
+}
+
+async fn merge_pull_request(
+    input: &Value,
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<String, String> {
+    let owner = input["owner"].as_str().ok_or("missing owner")?;
+    let repo = input["repo"].as_str().ok_or("missing repo")?;
+    let number = input["pull_number"].as_i64().ok_or("missing pull_number")?;
+    let method = input["merge_method"].as_str().unwrap_or("squash");
+
+    let resp = client
+        .put(github_api(&format!("/repos/{owner}/{repo}/pulls/{number}/merge")))
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", "nexus-server")
+        .header("accept", "application/vnd.github+json")
+        .json(&json!({ "merge_method": method }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status == 200 {
+        Ok(format!("PR {owner}/{repo}#{number} merged via {method}"))
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("GitHub API {status}: {body}"))
+    }
+}
+
+async fn get_review_comments(
+    input: &Value,
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<String, String> {
+    let owner = input["owner"].as_str().ok_or("missing owner")?;
+    let repo = input["repo"].as_str().ok_or("missing repo")?;
+    let number = input["pull_number"].as_i64().ok_or("missing pull_number")?;
+
+    let resp = client
+        .get(github_api(&format!(
+            "/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100"
+        )))
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", "nexus-server")
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status != 200 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API {status}: {body}"));
+    }
+
+    let comments: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+    let summary: Vec<Value> = comments
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c["id"],
+                "user": c["user"]["login"],
+                "path": c["path"],
+                "line": c["line"],
+                "body": c["body"],
+                "in_reply_to_id": c["in_reply_to_id"],
+                "created_at": c["created_at"],
+            })
+        })
+        .collect();
+
+    Ok(serde_json::to_string_pretty(&summary).unwrap_or_default())
+}
+
+async fn reply_to_review_comment(
+    input: &Value,
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<String, String> {
+    let owner = input["owner"].as_str().ok_or("missing owner")?;
+    let repo = input["repo"].as_str().ok_or("missing repo")?;
+    let number = input["pull_number"].as_i64().ok_or("missing pull_number")?;
+    let comment_id = input["comment_id"].as_i64().ok_or("missing comment_id")?;
+    let body = input["body"].as_str().ok_or("missing body")?;
+
+    let resp = client
+        .post(github_api(&format!(
+            "/repos/{owner}/{repo}/pulls/{number}/comments"
+        )))
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", "nexus-server")
+        .header("accept", "application/vnd.github+json")
+        .json(&json!({ "body": body, "in_reply_to": comment_id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status == 201 {
+        Ok(format!(
+            "Reply posted to comment {comment_id} on {owner}/{repo}#{number}"
+        ))
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("GitHub API {status}: {body}"))
