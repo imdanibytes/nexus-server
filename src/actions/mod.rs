@@ -5,12 +5,13 @@ use crate::agent::AgentLoop;
 use crate::cloud_event::CloudEvent;
 use crate::config::{ClaudeConfig, RuleConfig};
 use crate::routing::resolve_template;
+use crate::server::SharedState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
     #[error("claude config missing — add [claude] section to config")]
     ClaudeConfigMissing,
-    #[error("github token env var '{0}' not set")]
+    #[error("github token unavailable: {0}")]
     GithubTokenMissing(String),
     #[error("prompt missing on rule '{0}'")]
     PromptMissing(String),
@@ -30,7 +31,7 @@ pub async fn dispatch(
     rule: &RuleConfig,
     event: &CloudEvent,
     claude_config: Option<&ClaudeConfig>,
-    github_token_env: &str,
+    shared: &SharedState,
     http_client: &reqwest::Client,
 ) -> Result<(), ActionError> {
     match rule.action.as_str() {
@@ -48,8 +49,10 @@ pub async fn dispatch(
         "agent" => {
             let config =
                 claude_config.ok_or(ActionError::ClaudeConfigMissing)?;
-            let github_token = std::env::var(github_token_env)
-                .map_err(|_| ActionError::GithubTokenMissing(github_token_env.to_string()))?;
+            let github_token = shared
+                .github_token()
+                .await
+                .map_err(ActionError::GithubTokenMissing)?;
 
             let prompt_template = rule
                 .prompt

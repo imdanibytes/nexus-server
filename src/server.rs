@@ -12,16 +12,32 @@ use tracing::{error, info, warn};
 use crate::actions;
 use crate::cloud_event::CloudEvent;
 use crate::config::{ClaudeConfig, RuleConfig, VerificationConfig, WebhookConfig};
+use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
 use crate::verification;
 
 /// Shared state across all routes.
-struct SharedState {
-    rules: Vec<RuleConfig>,
-    claude: Option<ClaudeConfig>,
-    github_token_env: String,
-    http_client: reqwest::Client,
-    webhook_count: usize,
+pub struct SharedState {
+    pub rules: Vec<RuleConfig>,
+    pub claude: Option<ClaudeConfig>,
+    pub github_token_env: String,
+    pub github_app: Option<GitHubAppAuth>,
+    pub http_client: reqwest::Client,
+    pub webhook_count: usize,
+}
+
+impl SharedState {
+    /// Resolve the GitHub token — app auth takes precedence over static PAT.
+    pub async fn github_token(&self) -> Result<String, String> {
+        if let Some(ref app) = self.github_app {
+            app.get_token()
+                .await
+                .map_err(|e| format!("GitHub App auth failed: {e}"))
+        } else {
+            std::env::var(&self.github_token_env)
+                .map_err(|_| format!("env var '{}' not set", self.github_token_env))
+        }
+    }
 }
 
 /// Per-webhook route state — each webhook endpoint gets its own copy.
@@ -32,18 +48,46 @@ struct WebhookState {
 }
 
 pub fn build_router(config: crate::config::Config) -> Router {
+    let http_client = reqwest::Client::new();
+
     let github_token_env = config
         .github
         .as_ref()
         .map(|g| g.token_env.clone())
         .unwrap_or_else(|| "GITHUB_TOKEN".to_string());
 
+    let github_app = config
+        .github
+        .as_ref()
+        .and_then(|g| {
+            match (g.app_id.as_deref(), g.private_key_path.as_deref()) {
+                (Some(app_id), Some(key_path)) => {
+                    match GitHubAppAuth::new(
+                        app_id.to_string(),
+                        key_path,
+                        http_client.clone(),
+                    ) {
+                        Ok(auth) => {
+                            info!("GitHub App auth configured (app_id={app_id})");
+                            Some(auth)
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to init GitHub App auth, falling back to PAT");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        });
+
     let shared = Arc::new(SharedState {
         webhook_count: config.webhooks.len(),
         rules: config.rules,
         claude: config.claude,
         github_token_env,
-        http_client: reqwest::Client::new(),
+        github_app,
+        http_client,
     });
 
     let mut router = Router::new()
@@ -134,7 +178,7 @@ async fn handle_webhook(
             rule,
             &event,
             claude_config,
-            &state.shared.github_token_env,
+            &state.shared,
             &state.shared.http_client,
         )
         .await

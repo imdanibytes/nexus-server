@@ -1,6 +1,7 @@
 mod actions;
 mod agent;
 mod cloud_event;
+mod github_auth;
 mod config;
 mod routing;
 mod server;

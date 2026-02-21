@@ -93,8 +93,14 @@ pub struct RuleConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GithubConfig {
+    /// Static token (PAT) — used if no app config is present
     #[serde(default = "default_github_token_env")]
     pub token_env: String,
+    /// GitHub App auth — takes precedence over token_env
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub private_key_path: Option<String>,
 }
 
 fn default_github_token_env() -> String {
