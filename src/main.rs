@@ -3,6 +3,7 @@ mod agent;
 mod cloud_event;
 mod github_auth;
 mod config;
+mod mcp;
 mod routing;
 mod server;
 mod verification;
@@ -46,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting nexus-server"
     );
 
-    let router = server::build_router(config);
+    let router = server::build_router(config, cli.config.into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let local_addr = listener.local_addr()?;
     info!("listening on {local_addr}");

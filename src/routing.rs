@@ -9,7 +9,7 @@ pub fn match_rules<'a>(
 ) -> Vec<&'a RuleConfig> {
     rules
         .iter()
-        .filter(|r| event.type_.starts_with(&r.filter.type_prefix))
+        .filter(|r| r.enabled && event.type_.starts_with(&r.filter.type_prefix))
         .collect()
 }
 
@@ -57,6 +57,7 @@ mod tests {
                 type_prefix: prefix.to_string(),
             },
             action: action.to_string(),
+            enabled: true,
             prompt: None,
             system_prompt: None,
             url: None,

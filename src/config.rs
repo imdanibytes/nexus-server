@@ -81,6 +81,8 @@ pub struct RuleConfig {
     pub name: String,
     pub filter: FilterConfig,
     pub action: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
