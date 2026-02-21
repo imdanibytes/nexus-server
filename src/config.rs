@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
+    pub tunnel: Option<TunnelConfig>,
+    #[serde(default)]
     pub claude: Option<ClaudeConfig>,
     #[serde(default)]
     pub webhooks: Vec<WebhookConfig>,
@@ -19,6 +21,19 @@ pub struct ServerConfig {
 
 fn default_bind() -> String {
     "0.0.0.0:8090".to_string()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TunnelConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional fixed ngrok domain (e.g. "my-app.ngrok-free.app")
+    #[serde(default)]
+    pub domain: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]

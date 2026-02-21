@@ -35,6 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::load(&cli.config)?;
 
     let bind = config.server.bind.clone();
+    let tunnel_config = config.tunnel.clone();
+
     info!(
         bind = %bind,
         webhooks = config.webhooks.len(),
@@ -44,8 +46,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let router = server::build_router(config);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    info!("listening on {bind}");
+    let local_addr = listener.local_addr()?;
+    info!("listening on {local_addr}");
+
+    // Start ngrok tunnel in background if configured
+    let use_tunnel = tunnel_config
+        .as_ref()
+        .is_some_and(|t| t.enabled);
+
+    if use_tunnel {
+        let forward_to = format!("http://{local_addr}");
+        tokio::spawn(async move {
+            if let Err(e) = start_tunnel(tunnel_config.as_ref().unwrap(), &forward_to).await {
+                tracing::error!(error = %e, "ngrok tunnel failed");
+            }
+        });
+    }
 
     axum::serve(listener, router).await?;
+    Ok(())
+}
+
+async fn start_tunnel(
+    config: &config::TunnelConfig,
+    forward_to: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use ngrok::config::ForwarderBuilder;
+    use ngrok::tunnel::EndpointInfo;
+
+    let session = ngrok::Session::builder()
+        .authtoken_from_env()
+        .connect()
+        .await?;
+
+    let mut endpoint = session.http_endpoint();
+    if let Some(domain) = config.domain.as_deref() {
+        endpoint.domain(domain);
+    }
+
+    let tunnel: ngrok::forwarder::Forwarder<ngrok::tunnel::HttpTunnel> = endpoint
+        .listen_and_forward(forward_to.parse()?)
+        .await?;
+
+    info!(url = %tunnel.url(), "ngrok tunnel established");
+
+    // Block forever — tunnel stays alive as long as this future is alive
+    futures::future::pending::<()>().await;
     Ok(())
 }
