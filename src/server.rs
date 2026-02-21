@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -37,33 +37,32 @@ pub struct SharedState {
 }
 
 /// Bounded set of recently seen delivery IDs.
-pub struct DeliveryTracker {
+pub(crate) struct DeliveryTracker {
     ids: HashSet<String>,
-    order: Vec<String>,
+    order: VecDeque<String>,
 }
 
 impl DeliveryTracker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             ids: HashSet::new(),
-            order: Vec::new(),
+            order: VecDeque::new(),
         }
     }
 
     /// Returns `true` if this delivery ID was already seen.
-    pub fn check_and_insert(&mut self, id: String) -> bool {
+    pub(crate) fn check_and_insert(&mut self, id: String) -> bool {
         if self.ids.contains(&id) {
             return true;
         }
         // Evict oldest if at capacity
         if self.order.len() >= MAX_SEEN_DELIVERIES {
-            if let Some(old) = self.order.first().cloned() {
+            if let Some(old) = self.order.pop_front() {
                 self.ids.remove(&old);
-                self.order.remove(0);
             }
         }
         self.ids.insert(id.clone());
-        self.order.push(id);
+        self.order.push_back(id);
         false
     }
 }
@@ -151,7 +150,11 @@ pub fn build_router(config: crate::config::Config) -> Router {
     for wh in config.webhooks {
         let path = wh.path.clone();
 
-        if wh.verification.is_none() {
+        let unsecured = match &wh.verification {
+            None => true,
+            Some(v) => v.method == "none",
+        };
+        if unsecured {
             warn!(
                 id = %wh.id,
                 path = %path,
@@ -209,7 +212,7 @@ async fn handle_webhook(
             .check_and_insert(delivery_id.to_string());
         if is_replay {
             warn!(delivery_id, "duplicate delivery rejected");
-            return Err(StatusCode::OK);
+            return Ok(axum::Json(json!({"duplicate": true})));
         }
     }
 
