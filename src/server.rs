@@ -1,12 +1,14 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::actions;
@@ -16,6 +18,12 @@ use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
 use crate::verification;
 
+/// Max webhook request body size (256 KB).
+const MAX_BODY_SIZE: usize = 256 * 1024;
+
+/// Max number of delivery IDs to track for replay protection.
+const MAX_SEEN_DELIVERIES: usize = 10_000;
+
 /// Shared state across all routes.
 pub struct SharedState {
     pub rules: Vec<RuleConfig>,
@@ -24,6 +32,40 @@ pub struct SharedState {
     pub github_app: Option<GitHubAppAuth>,
     pub http_client: reqwest::Client,
     pub webhook_count: usize,
+    /// Recently seen delivery IDs for replay protection.
+    pub seen_deliveries: Mutex<DeliveryTracker>,
+}
+
+/// Bounded set of recently seen delivery IDs.
+pub struct DeliveryTracker {
+    ids: HashSet<String>,
+    order: Vec<String>,
+}
+
+impl DeliveryTracker {
+    pub fn new() -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: Vec::new(),
+        }
+    }
+
+    /// Returns `true` if this delivery ID was already seen.
+    pub fn check_and_insert(&mut self, id: String) -> bool {
+        if self.ids.contains(&id) {
+            return true;
+        }
+        // Evict oldest if at capacity
+        if self.order.len() >= MAX_SEEN_DELIVERIES {
+            if let Some(old) = self.order.first().cloned() {
+                self.ids.remove(&old);
+                self.order.remove(0);
+            }
+        }
+        self.ids.insert(id.clone());
+        self.order.push(id);
+        false
+    }
 }
 
 impl SharedState {
@@ -88,6 +130,7 @@ pub fn build_router(config: crate::config::Config) -> Router {
         github_token_env,
         github_app,
         http_client,
+        seen_deliveries: Mutex::new(DeliveryTracker::new()),
     });
 
     let mut router = Router::new()
@@ -107,6 +150,15 @@ pub fn build_router(config: crate::config::Config) -> Router {
 
     for wh in config.webhooks {
         let path = wh.path.clone();
+
+        if wh.verification.is_none() {
+            warn!(
+                id = %wh.id,
+                path = %path,
+                "webhook has NO signature verification — any source can trigger it"
+            );
+        }
+
         info!(id = %wh.id, path = %path, "mounting webhook endpoint");
 
         let wh_state = WebhookState {
@@ -116,7 +168,9 @@ pub fn build_router(config: crate::config::Config) -> Router {
 
         router = router.route(
             &path,
-            post(handle_webhook).with_state(wh_state),
+            post(handle_webhook)
+                .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+                .with_state(wh_state),
         );
     }
 
@@ -140,6 +194,23 @@ async fn handle_webhook(
     // Verify signature if configured
     if let Some(ref verification) = webhook.verification {
         verify_request(verification, &headers, &body)?;
+    }
+
+    // Replay protection via X-GitHub-Delivery header
+    if let Some(delivery_id) = headers
+        .get("x-github-delivery")
+        .and_then(|v| v.to_str().ok())
+    {
+        let is_replay = state
+            .shared
+            .seen_deliveries
+            .lock()
+            .await
+            .check_and_insert(delivery_id.to_string());
+        if is_replay {
+            warn!(delivery_id, "duplicate delivery rejected");
+            return Err(StatusCode::OK);
+        }
     }
 
     // Parse body
@@ -266,4 +337,37 @@ fn build_cloud_event(
         .to_string();
 
     CloudEvent::new(type_, source, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_tracker_detects_replay() {
+        let mut tracker = DeliveryTracker::new();
+        assert!(!tracker.check_and_insert("aaa".to_string()));
+        assert!(tracker.check_and_insert("aaa".to_string())); // replay
+        assert!(!tracker.check_and_insert("bbb".to_string()));
+    }
+
+    #[test]
+    fn delivery_tracker_evicts_oldest() {
+        let mut tracker = DeliveryTracker::new();
+        // Fill to capacity
+        for i in 0..MAX_SEEN_DELIVERIES {
+            assert!(!tracker.check_and_insert(format!("id-{i}")));
+        }
+        // Oldest should still be tracked
+        assert!(tracker.check_and_insert("id-0".to_string()));
+
+        // Insert one more to trigger eviction of id-0
+        assert!(!tracker.check_and_insert("new-id".to_string()));
+
+        // id-0 was evicted, no longer detected as replay
+        assert!(!tracker.check_and_insert("id-0".to_string()));
+
+        // Recent IDs should still be tracked (id-2 hasn't been evicted)
+        assert!(tracker.check_and_insert("id-2".to_string()));
+    }
 }
