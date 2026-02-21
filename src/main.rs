@@ -21,6 +21,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider before any TLS usage (ngrok, reqwest)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Load .env before anything else reads env vars
     if let Err(e) = dotenvy::dotenv() {
         // Not an error — .env is optional
