@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tracing::{info, warn};
 
 use crate::sandbox::Sandbox;
 
@@ -102,40 +101,22 @@ pub fn sandbox_tool_definitions() -> Vec<Value> {
     ]
 }
 
-/// Execute a sandbox tool call. Returns the result as a string.
-pub async fn execute(
+/// Dispatch a sandbox tool call by name, returning Result.
+pub(crate) async fn dispatch(
     name: &str,
     input: &Value,
     sandbox: &Arc<Sandbox>,
-) -> String {
-    let result = match name {
+) -> Result<String, String> {
+    match name {
         "read_file" => read_file(input, sandbox).await,
         "write_file" => write_file(input, sandbox).await,
         "edit_file" => edit_file(input, sandbox).await,
         "exec_command" => exec_command(input, sandbox).await,
         "list_directory" => list_directory(input, sandbox).await,
         _ => Err(format!("unknown sandbox tool: {name}")),
-    };
-
-    match result {
-        Ok(msg) => {
-            info!(tool = name, "sandbox tool succeeded");
-            msg
-        }
-        Err(e) => {
-            warn!(tool = name, error = %e, "sandbox tool failed");
-            format!("Error: {e}")
-        }
     }
 }
 
-/// Check if a tool name is a sandbox tool.
-pub fn is_sandbox_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read_file" | "write_file" | "edit_file" | "exec_command" | "list_directory"
-    )
-}
 
 async fn read_file(input: &Value, sandbox: &Sandbox) -> Result<String, String> {
     let path = input["path"].as_str().ok_or("missing path")?;

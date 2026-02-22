@@ -253,6 +253,7 @@ async fn execute_sandbox(
 ///
 /// Requires: `prompt`.
 /// Optional: `sandbox_id` — attach a sandbox for filesystem tools.
+/// Optional: `system_prompt` — custom system prompt for the agent.
 /// Returns: `{ "output": "<agent final text>" }`
 async fn execute_agent(
     with: Option<&Value>,
@@ -262,7 +263,11 @@ async fn execute_agent(
 ) -> Result<Value, WorkflowError> {
     let args = match with {
         Some(v) => expressions::resolve_object(v, &ctx.input, &ctx.vars())?,
-        None => return Err(WorkflowError::Task("custom:agent requires 'with' arguments".into())),
+        None => {
+            return Err(WorkflowError::Task(
+                "custom:agent requires 'with' arguments".into(),
+            ))
+        }
     };
 
     let prompt = args
@@ -275,34 +280,66 @@ async fn execute_agent(
         .as_ref()
         .ok_or_else(|| WorkflowError::Task("[claude] config section required for agent".into()))?;
 
+    let api_key = std::env::var(&claude_config.api_key_env).unwrap_or_default();
+
     let github_token = shared
         .github_token()
         .await
         .map_err(|e| WorkflowError::Task(format!("github token: {e}")))?;
 
-    let mut agent = crate::agent::AgentLoop::new(
-        claude_config.clone(),
-        github_token,
-        shared.http_client.clone(),
-    )
-    .with_cancel(handle.cancel.clone());
+    // Build provider
+    let provider =
+        nexus_agent::AnthropicProvider::with_client(shared.http_client.clone(), api_key);
 
-    // Attach sandbox if specified
+    // Build tools: GitHub tools + optional sandbox tools
+    let mut registry =
+        crate::agent::github_toolset(shared.http_client.clone(), github_token);
+
     if let Some(sandbox_id) = args.get("sandbox_id").and_then(|v| v.as_str()) {
         let sb = shared
             .sandbox_registry
             .get(sandbox_id)
             .await
             .ok_or_else(|| WorkflowError::Task(format!("sandbox '{sandbox_id}' not found")))?;
-        agent = agent.with_sandbox(sb);
+        registry = crate::agent::add_sandbox_tools(registry, sb);
     }
+
+    // Build context manager
+    let system_prompt = args
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or(
+            "You are an autonomous coding agent. Use the available tools to accomplish the task. Be concise and focused.",
+        );
+
+    let context = nexus_agent::ManagedContextManager::new(
+        &claude_config.model,
+        claude_config.max_tokens,
+        200_000, // Claude context window
+    )
+    .with_system(system_prompt)
+    .with_tools(registry.schemas());
+
+    let tools = nexus_agent::ToolPipeline::new(registry);
+
+    let config = nexus_agent::AgentConfig {
+        model: claude_config.model.clone(),
+        max_tokens: claude_config.max_tokens,
+        max_turns: 20,
+        session_id: None,
+    };
+
+    let mut agent = nexus_agent::Agent::new(provider, context, tools, config);
 
     info!(prompt_len = prompt.len(), "workflow: starting agent");
 
-    let output = agent
-        .run(prompt)
+    let result = agent
+        .invoke_with_cancel(prompt, handle.cancel.clone())
         .await
-        .map_err(|e| WorkflowError::Task(format!("agent failed: {e}")))?;
+        .map_err(|e| match e {
+            nexus_agent::AgentError::Cancelled => WorkflowError::Cancelled,
+            other => WorkflowError::Task(format!("agent failed: {other}")),
+        })?;
 
-    Ok(serde_json::json!({ "output": output }))
+    Ok(serde_json::json!({ "output": result.text }))
 }

@@ -1415,9 +1415,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-server"
-version = "0.2.0"
+name = "nexus-agent"
+version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "nexus-server"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "clap",
@@ -1432,6 +1448,7 @@ dependencies = [
  "jaq-parse",
  "jaq-std",
  "jsonwebtoken",
+ "nexus-agent",
  "ngrok",
  "reqwest",
  "rmcp",

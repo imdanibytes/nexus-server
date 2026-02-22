@@ -1,5 +1,4 @@
 use serde_json::{json, Value};
-use tracing::{info, warn};
 
 /// Tool definitions sent to the Claude API.
 pub fn github_tool_definitions() -> Vec<Value> {
@@ -150,39 +149,60 @@ pub fn github_tool_definitions() -> Vec<Value> {
                 "required": ["owner", "repo", "pull_number"]
             }
         }),
+        json!({
+            "name": "get_issue",
+            "description": "Get details of a GitHub issue including title, body, labels, and state.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string", "description": "Repository owner" },
+                    "repo": { "type": "string", "description": "Repository name" },
+                    "issue_number": { "type": "integer", "description": "Issue number" }
+                },
+                "required": ["owner", "repo", "issue_number"]
+            }
+        }),
+        json!({
+            "name": "create_pull_request",
+            "description": "Create a pull request on a GitHub repository.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "owner": { "type": "string", "description": "Repository owner" },
+                    "repo": { "type": "string", "description": "Repository name" },
+                    "title": { "type": "string", "description": "PR title" },
+                    "body": { "type": "string", "description": "PR body (markdown)" },
+                    "head": { "type": "string", "description": "Branch name containing the changes" },
+                    "base": { "type": "string", "description": "Branch to merge into (default: main)" }
+                },
+                "required": ["owner", "repo", "title", "body", "head"]
+            }
+        }),
     ]
 }
 
-/// Execute a tool call and return the result as a string.
-pub async fn execute(
+/// Dispatch a tool call by name, returning Result.
+pub(crate) async fn dispatch(
     name: &str,
     input: &Value,
     client: &reqwest::Client,
-    github_token: &str,
-) -> String {
-    let result = match name {
-        "create_comment" => create_comment(input, client, github_token).await,
-        "add_labels" => add_labels(input, client, github_token).await,
-        "close_issue" => close_issue(input, client, github_token).await,
-        "create_review" => create_review(input, client, github_token).await,
-        "get_pull_request_diff" => get_pr_diff(input, client, github_token).await,
-        "get_review_comments" => get_review_comments(input, client, github_token).await,
-        "reply_to_review_comment" => reply_to_review_comment(input, client, github_token).await,
-        "merge_pull_request" => merge_pull_request(input, client, github_token).await,
+    token: &str,
+) -> Result<String, String> {
+    match name {
+        "create_comment" => create_comment(input, client, token).await,
+        "add_labels" => add_labels(input, client, token).await,
+        "close_issue" => close_issue(input, client, token).await,
+        "create_review" => create_review(input, client, token).await,
+        "get_pull_request_diff" => get_pr_diff(input, client, token).await,
+        "get_review_comments" => get_review_comments(input, client, token).await,
+        "reply_to_review_comment" => reply_to_review_comment(input, client, token).await,
+        "merge_pull_request" => merge_pull_request(input, client, token).await,
+        "get_issue" => get_issue(input, client, token).await,
+        "create_pull_request" => create_pull_request(input, client, token).await,
         _ => Err(format!("unknown tool: {name}")),
-    };
-
-    match result {
-        Ok(msg) => {
-            info!(tool = name, "tool call succeeded");
-            msg
-        }
-        Err(e) => {
-            warn!(tool = name, error = %e, "tool call failed");
-            format!("Error: {e}")
-        }
     }
 }
+
 
 fn github_api(path: &str) -> String {
     format!("https://api.github.com{path}")
@@ -477,6 +497,90 @@ async fn get_pr_diff(
         } else {
             Ok(diff)
         }
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("GitHub API {status}: {body}"))
+    }
+}
+
+async fn get_issue(
+    input: &Value,
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<String, String> {
+    let owner = input["owner"].as_str().ok_or("missing owner")?;
+    let repo = input["repo"].as_str().ok_or("missing repo")?;
+    let number = input["issue_number"].as_i64().ok_or("missing issue_number")?;
+
+    let resp = client
+        .get(github_api(&format!("/repos/{owner}/{repo}/issues/{number}")))
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", "nexus-server")
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status != 200 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub API {status}: {body}"));
+    }
+
+    let issue: Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let labels: Vec<&str> = issue["labels"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|l| l["name"].as_str()).collect())
+        .unwrap_or_default();
+
+    let compact = json!({
+        "number": issue["number"],
+        "title": issue["title"],
+        "body": issue["body"],
+        "state": issue["state"],
+        "labels": labels,
+        "user": issue["user"]["login"],
+        "html_url": issue["html_url"],
+        "comments": issue["comments"],
+    });
+
+    Ok(serde_json::to_string_pretty(&compact).unwrap_or_default())
+}
+
+async fn create_pull_request(
+    input: &Value,
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<String, String> {
+    let owner = input["owner"].as_str().ok_or("missing owner")?;
+    let repo = input["repo"].as_str().ok_or("missing repo")?;
+    let title = input["title"].as_str().ok_or("missing title")?;
+    let body = input["body"].as_str().ok_or("missing body")?;
+    let head = input["head"].as_str().ok_or("missing head")?;
+    let base = input["base"].as_str().unwrap_or("main");
+
+    let resp = client
+        .post(github_api(&format!("/repos/{owner}/{repo}/pulls")))
+        .header("authorization", format!("Bearer {token}"))
+        .header("user-agent", "nexus-server")
+        .header("accept", "application/vnd.github+json")
+        .json(&json!({
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status().as_u16();
+    if status == 201 {
+        let pr: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let number = pr["number"].as_i64().unwrap_or(0);
+        let html_url = pr["html_url"].as_str().unwrap_or("");
+        Ok(format!("PR #{number} created: {html_url}"))
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!("GitHub API {status}: {body}"))
