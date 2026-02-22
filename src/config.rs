@@ -10,7 +10,7 @@ pub struct Config {
     #[serde(default)]
     pub github: Option<GithubConfig>,
     #[serde(default)]
-    pub webhooks: Vec<WebhookConfig>,
+    pub sources: Vec<SourceConfig>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
 }
@@ -19,10 +19,6 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: String,
-    /// Shared secret for the /ingest endpoint. Read from this env var at runtime.
-    /// If unset, the /ingest endpoint is disabled entirely.
-    #[serde(default)]
-    pub ingest_secret_env: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -33,7 +29,6 @@ fn default_bind() -> String {
 pub struct TunnelConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Optional fixed ngrok domain (e.g. "my-app.ngrok-free.app")
     #[serde(default)]
     pub domain: Option<String>,
 }
@@ -64,16 +59,22 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WebhookConfig {
+#[derive(Debug, Deserialize, Clone)]
+pub struct SourceConfig {
     pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
     pub path: String,
-    pub event_type_prefix: String,
+    #[serde(default)]
+    pub event_type_prefix: Option<String>,
     #[serde(default)]
     pub verification: Option<VerificationConfig>,
+    #[serde(default)]
+    pub secret_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct VerificationConfig {
     pub method: String,
     #[serde(default)]
@@ -95,21 +96,16 @@ pub struct RuleConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub body_template: Option<String>,
-    /// Target URL for "forward" action — sends the full CloudEvent as JSON.
     #[serde(default)]
     pub target: Option<String>,
-    /// Shared secret (env var name) the forward action sends as Bearer token.
-    /// The receiving server's /ingest endpoint checks this.
     #[serde(default)]
     pub target_secret_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GithubConfig {
-    /// Static token (PAT) — used if no app config is present
     #[serde(default = "default_github_token_env")]
     pub token_env: String,
-    /// GitHub App auth — takes precedence over token_env
     #[serde(default)]
     pub app_id: Option<String>,
     #[serde(default)]
@@ -142,18 +138,24 @@ mod tests {
         let toml = r#"
 [server]
 bind = "127.0.0.1:9000"
-ingest_secret_env = "INGEST_TOKEN"
 
 [claude]
 api_key_env = "MY_KEY"
 model = "claude-sonnet-4-20250514"
 max_tokens = 2048
 
-[[webhooks]]
+[[sources]]
 id = "gh"
+type = "github"
 path = "/hook/github"
 event_type_prefix = "com.github"
 verification = { method = "github-hmac", secret_env = "GH_SECRET" }
+
+[[sources]]
+id = "events"
+type = "cloudevents"
+path = "/events"
+secret_env = "EVENTS_TOKEN"
 
 [[rules]]
 name = "Test rule"
@@ -165,18 +167,23 @@ prompt = "Hello {{event.data.issue.title}}"
 name = "Forward to dev"
 filter = { type_prefix = "com.github" }
 action = "forward"
-target = "http://localhost:8091/ingest"
-target_secret_env = "DEV_INGEST_TOKEN"
+target = "http://localhost:8091/events"
+target_secret_env = "DEV_EVENTS_TOKEN"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.bind, "127.0.0.1:9000");
-        assert_eq!(config.server.ingest_secret_env.as_deref(), Some("INGEST_TOKEN"));
-        assert_eq!(config.webhooks.len(), 1);
-        assert_eq!(config.webhooks[0].id, "gh");
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.sources[0].id, "gh");
+        assert_eq!(config.sources[0].type_, "github");
+        assert_eq!(config.sources[1].id, "events");
+        assert_eq!(config.sources[1].type_, "cloudevents");
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, "claude");
         assert_eq!(config.rules[1].action, "forward");
-        assert_eq!(config.rules[1].target.as_deref(), Some("http://localhost:8091/ingest"));
+        assert_eq!(
+            config.rules[1].target.as_deref(),
+            Some("http://localhost:8091/events")
+        );
         let claude = config.claude.unwrap();
         assert_eq!(claude.max_tokens, 2048);
     }
@@ -189,7 +196,7 @@ target_secret_env = "DEV_INGEST_TOKEN"
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.bind, "0.0.0.0:8090");
         assert!(config.claude.is_none());
-        assert!(config.webhooks.is_empty());
+        assert!(config.sources.is_empty());
         assert!(config.rules.is_empty());
     }
 }

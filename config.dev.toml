@@ -1,0 +1,15 @@
+[server]
+bind = "0.0.0.0:8091"
+
+[[sources]]
+id = "events-receiver"
+type = "cloudevents"
+path = "/events"
+secret_env = "DEV_EVENTS_SECRET"
+
+[[rules]]
+name = "Log all forwarded events"
+filter = { type_prefix = "com.github" }
+action = "http_post"
+url = "https://httpbin.org/post"
+body_template = '{"text": "Forwarded event: {{event.data.repository.full_name}} — {{event.data.action}}"}'

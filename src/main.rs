@@ -1,10 +1,11 @@
 mod actions;
 mod agent;
-mod github_auth;
 mod config;
+mod github_auth;
 mod mcp;
 mod routing;
 mod server;
+mod sources;
 mod verification;
 
 use clap::Parser;
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         bind = %bind,
-        webhooks = config.webhooks.len(),
+        sources = config.sources.len(),
         rules = config.rules.len(),
         "starting nexus-server"
     );

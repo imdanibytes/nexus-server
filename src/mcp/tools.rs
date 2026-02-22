@@ -128,11 +128,9 @@ async fn list_rules(state: &SharedState) -> String {
 }
 
 fn list_webhooks(state: &SharedState) -> String {
-    // Webhook configs aren't stored on SharedState (consumed during router build).
-    // Return the count — full webhook info would require storing them.
     json!({
-        "webhook_count": state.webhook_count,
-        "note": "Webhook details are consumed during router initialization. Use /status for counts."
+        "source_count": state.source_count,
+        "note": "Source details are consumed during router initialization. Use /status for counts."
     })
     .to_string()
 }
@@ -148,7 +146,7 @@ fn server_stats(state: &SharedState) -> String {
         "events_matched": stats.events_matched.load(Ordering::Relaxed),
         "actions_succeeded": stats.actions_succeeded.load(Ordering::Relaxed),
         "actions_failed": stats.actions_failed.load(Ordering::Relaxed),
-        "webhooks": state.webhook_count,
+        "sources": state.source_count,
     })
     .to_string()
 }

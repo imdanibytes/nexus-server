@@ -1,19 +1,29 @@
 [server]
 bind = "0.0.0.0:8090"
-# Shared secret for the /events CloudEvents receiver (reads from this env var).
-# If unset, /events endpoint is disabled entirely.
-# ingest_secret_env = "NEXUS_EVENTS_SECRET"
 
 [claude]
 api_key_env = "ANTHROPIC_API_KEY"   # reads from this env var at runtime
 model = "claude-sonnet-4-20250514"
 max_tokens = 4096
 
-[[webhooks]]
+# Sources — pluggable event ingestion endpoints.
+# Each source produces CloudEvents that flow into the rules pipeline.
+
+[[sources]]
 id = "github-main"
+type = "github"
 path = "/hook/github"
 event_type_prefix = "com.github"
 verification = { method = "github-hmac", secret_env = "GITHUB_WEBHOOK_SECRET" }
+
+# CloudEvents HTTP Webhook spec receiver.
+# Supports both structured (application/cloudevents+json) and binary (ce-* headers) mode.
+# Implements OPTIONS handshake for abuse protection.
+# [[sources]]
+# id = "events-receiver"
+# type = "cloudevents"
+# path = "/events"
+# secret_env = "NEXUS_EVENTS_SECRET"
 
 [[rules]]
 name = "New issues → Claude triage"
@@ -87,7 +97,7 @@ Body: {{event.data.review.body}}
 
 # Forward all events to a dev instance for testing.
 # Uses the CloudEvents HTTP Webhook spec — the target's /events endpoint
-# must have ingest_secret_env configured and support the OPTIONS handshake.
+# must have a cloudevents source configured with a matching secret.
 # [[rules]]
 # name = "Forward to dev"
 # filter = { type_prefix = "com.github" }
