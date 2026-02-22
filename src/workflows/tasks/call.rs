@@ -333,13 +333,74 @@ async fn execute_agent(
 
     info!(prompt_len = prompt.len(), "workflow: starting agent");
 
+    // Stream agent events into the handle's log buffer for observability
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<nexus_agent::AgentEvent>(64);
+    let log_buf = handle.log_buffer.clone();
+    let drain_task = tokio::spawn(async move {
+        use crate::workflows::handle::push_log;
+        while let Some(event) = rx.recv().await {
+            let entry = match &event {
+                nexus_agent::AgentEvent::TurnStart { turn } => {
+                    format!("[turn {turn}] started")
+                }
+                nexus_agent::AgentEvent::Thinking { content } => {
+                    let preview = if content.len() > 120 {
+                        format!("{}...", &content[..120])
+                    } else {
+                        content.clone()
+                    };
+                    format!("[thinking] {preview}")
+                }
+                nexus_agent::AgentEvent::Text { content } => {
+                    let preview = if content.len() > 200 {
+                        format!("{}...", &content[..200])
+                    } else {
+                        content.clone()
+                    };
+                    format!("[text] {preview}")
+                }
+                nexus_agent::AgentEvent::ToolCall { name, input } => {
+                    let input_str = input.to_string();
+                    let preview = if input_str.len() > 150 {
+                        format!("{}...", &input_str[..150])
+                    } else {
+                        input_str
+                    };
+                    format!("[tool_call] {name}({preview})")
+                }
+                nexus_agent::AgentEvent::ToolResult { name, output, is_error } => {
+                    let status = if *is_error { "ERR" } else { "ok" };
+                    let preview = if output.len() > 200 {
+                        format!("{}...", &output[..200])
+                    } else {
+                        output.clone()
+                    };
+                    format!("[tool_result] {name} [{status}] {preview}")
+                }
+                nexus_agent::AgentEvent::Compacted { pre_tokens, post_tokens } => {
+                    format!("[compacted] {pre_tokens} -> {post_tokens} tokens")
+                }
+                nexus_agent::AgentEvent::Finished { turns } => {
+                    format!("[finished] {turns} turns")
+                }
+                nexus_agent::AgentEvent::Error { message } => {
+                    format!("[error] {message}")
+                }
+            };
+            push_log(&log_buf, entry);
+        }
+    });
+
     let result = agent
-        .invoke_with_cancel(prompt, handle.cancel.clone())
+        .invoke_streaming_with_cancel(prompt, handle.cancel.clone(), tx)
         .await
         .map_err(|e| match e {
             nexus_agent::AgentError::Cancelled => WorkflowError::Cancelled,
             other => WorkflowError::Task(format!("agent failed: {other}")),
         })?;
+
+    // Wait for drain task to finish processing remaining events
+    let _ = drain_task.await;
 
     Ok(serde_json::json!({ "output": result.text }))
 }

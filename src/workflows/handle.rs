@@ -4,6 +4,7 @@
 //! single `Clone + Send + Sync` struct that carries step counting,
 //! cancellation, and (later) timeouts, checkpointing, and auditing.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,37 @@ use tokio_util::sync::CancellationToken;
 use crate::workflows::audit::AuditSender;
 use crate::workflows::checkpoint::FileCheckpointWriter;
 use crate::workflows::error::WorkflowError;
+
+/// Max log entries retained per task.
+const MAX_LOG_ENTRIES: usize = 50;
+
+/// Shared log buffer for agent execution events.
+///
+/// Uses `std::sync::Mutex` (not tokio) because locks are very short-lived
+/// (append a string) and we need blocking access for serialization.
+pub type LogBuffer = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+/// Create a new empty log buffer.
+pub fn new_log_buffer() -> LogBuffer {
+    Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES)))
+}
+
+/// Append a log entry, evicting the oldest if at capacity.
+pub fn push_log(buf: &LogBuffer, entry: String) {
+    if let Ok(mut logs) = buf.lock() {
+        if logs.len() >= MAX_LOG_ENTRIES {
+            logs.pop_front();
+        }
+        logs.push_back(entry);
+    }
+}
+
+/// Snapshot the log buffer as a Vec for serialization.
+pub fn snapshot_logs(buf: &LogBuffer) -> Vec<String> {
+    buf.lock()
+        .map(|logs| logs.iter().cloned().collect())
+        .unwrap_or_default()
+}
 
 /// Shared execution state for a single workflow run.
 ///
@@ -36,6 +68,8 @@ pub struct ExecutionHandle {
     pub workflow_name: Option<String>,
     /// Audit event broadcast sender.
     pub audit: Option<AuditSender>,
+    /// Shared log buffer for agent execution events.
+    pub log_buffer: LogBuffer,
 }
 
 impl ExecutionHandle {
@@ -49,6 +83,7 @@ impl ExecutionHandle {
             task_id: None,
             workflow_name: None,
             audit: None,
+            log_buffer: new_log_buffer(),
         }
     }
 
@@ -63,7 +98,14 @@ impl ExecutionHandle {
             task_id: None,
             workflow_name: None,
             audit: None,
+            log_buffer: new_log_buffer(),
         }
+    }
+
+    /// Create a handle with a shared log buffer (from TaskStore).
+    pub fn with_log_buffer(mut self, buf: LogBuffer) -> Self {
+        self.log_buffer = buf;
+        self
     }
 
     /// Set checkpoint writer and task metadata for crash recovery.

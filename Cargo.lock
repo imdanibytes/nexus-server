@@ -1417,7 +1417,7 @@ dependencies = [
 [[package]]
 name = "nexus-agent"
 version = "0.1.0"
-source = "git+https://github.com/imdanibytes/nexus-agent.git#d8f72fdd769235d33fd6c0e770b7f689c96a93a3"
+source = "git+https://github.com/imdanibytes/nexus-agent.git#88b732ee60350bcfc2f14fc5898cdddcd6bd4917"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "axum",

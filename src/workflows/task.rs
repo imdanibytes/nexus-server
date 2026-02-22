@@ -21,6 +21,7 @@ use crate::workflows::audit::{self, AuditEvent, AuditSender};
 use crate::workflows::checkpoint::FileCheckpointWriter;
 use crate::workflows::error::WorkflowError;
 use crate::workflows::executor;
+use crate::workflows::handle;
 use crate::workflows::handle::ExecutionHandle;
 use crate::workflows::model::WorkflowDef;
 
@@ -47,9 +48,25 @@ pub struct WorkflowTask {
     pub duration_ms: Option<u64>,
     pub error: Option<String>,
     pub output: Option<Value>,
+    /// Agent execution logs (last 50 entries). Readable while task is running.
+    #[serde(serialize_with = "serialize_log_buffer")]
+    pub log_buffer: handle::LogBuffer,
     /// Cancellation token — fire this to cooperatively cancel the workflow.
     #[serde(skip)]
     pub cancel: CancellationToken,
+}
+
+fn serialize_log_buffer<S>(buf: &handle::LogBuffer, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let logs = handle::snapshot_logs(buf);
+    let mut seq = serializer.serialize_seq(Some(logs.len()))?;
+    for entry in &logs {
+        seq.serialize_element(entry)?;
+    }
+    seq.end()
 }
 
 /// Summary view of a task for listing.
@@ -126,9 +143,11 @@ impl TaskStore {
     ) -> Result<(String, Value), WorkflowError> {
         let task_id = Self::generate_id();
         let cancel = CancellationToken::new();
+        let log_buffer = handle::new_log_buffer();
 
-        // Build the execution handle with this task's token
-        let mut handle = ExecutionHandle::with_cancel(1000, cancel.clone());
+        // Build the execution handle with this task's token and shared log buffer
+        let mut handle = ExecutionHandle::with_cancel(1000, cancel.clone())
+            .with_log_buffer(log_buffer.clone());
         if let Some(ref writer) = self.checkpoint_writer {
             handle = handle.with_checkpoint(
                 Arc::clone(writer),
@@ -150,6 +169,7 @@ impl TaskStore {
             duration_ms: None,
             error: None,
             output: None,
+            log_buffer: log_buffer.clone(),
             cancel,
         };
 
@@ -333,6 +353,7 @@ impl TaskStore {
                 duration_ms: None,
                 error: None,
                 output: None,
+                log_buffer: handle::new_log_buffer(),
                 cancel,
             };
 
@@ -522,6 +543,7 @@ do:
             duration_ms: None,
             error: None,
             output: None,
+            log_buffer: handle::new_log_buffer(),
             cancel: cancel.clone(),
         };
         store.tasks.lock().await.insert("test-cancel".into(), task);
@@ -545,6 +567,7 @@ do:
             duration_ms: Some(100),
             error: None,
             output: Some(serde_json::json!({})),
+            log_buffer: handle::new_log_buffer(),
             cancel: cancel.clone(),
         };
         store.tasks.lock().await.insert("done-task".into(), task);
