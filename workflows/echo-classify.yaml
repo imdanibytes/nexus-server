@@ -4,6 +4,12 @@ document:
   name: echo-classify
   version: "0.1.0"
 
+schedule:
+  on:
+    events:
+      - with:
+          type: com.test.classify
+
 # Simple test workflow:
 # 1. Extract event fields into context
 # 2. Classify by priority (high vs normal)

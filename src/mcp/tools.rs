@@ -5,24 +5,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use crate::config::Config;
 use crate::server::SharedState;
+use crate::workflows::model::WorkflowDef;
 
 const REPO: &str = "imdanibytes/nexus-server";
 
 /// MCP tool definitions.
 pub fn definitions() -> Vec<Value> {
     vec![
-        json!({
-            "name": "list_rules",
-            "description": "List all routing rules with their enabled state.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
-            "name": "list_webhooks",
-            "description": "List all registered webhook endpoints.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
+        // -- Server --
         json!({
             "name": "server_stats",
             "description": "Get server uptime and event processing statistics.",
@@ -42,37 +33,11 @@ pub fn definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "enable_rule",
-            "description": "Enable a routing rule by name.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Rule name" }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "disable_rule",
-            "description": "Disable a routing rule by name. Disabled rules are skipped during event matching.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Rule name" }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "reload_config",
-            "description": "Reload rules from config.toml on disk. Replaces all rules with the new config.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-        json!({
             "name": "refresh_github_token",
             "description": "Force-refresh the cached GitHub App installation token.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        // -- Self-update --
         json!({
             "name": "check_update",
             "description": "Check if a newer version of nexus-server is available on GitHub Releases.",
@@ -91,11 +56,63 @@ pub fn definitions() -> Vec<Value> {
                 }
             }
         }),
+        // -- Workflows --
         json!({
             "name": "list_workflows",
             "description": "List all loaded workflow definitions.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "create_workflow",
+            "description": "Create a new workflow definition from YAML content. Saves to ~/.nexus/workflows/{name}.yaml and loads it into the running server.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Workflow name (used as filename and lookup key)" },
+                    "yaml": { "type": "string", "description": "Workflow definition in YAML format (CNCF Serverless Workflow DSL)" }
+                },
+                "required": ["name", "yaml"]
+            }
+        }),
+        json!({
+            "name": "get_workflow",
+            "description": "Get the YAML source of a loaded workflow definition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Workflow name" }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "validate_workflow",
+            "description": "Validate a workflow YAML definition without loading it. Returns parse errors if invalid.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "yaml": { "type": "string", "description": "Workflow definition in YAML format" }
+                },
+                "required": ["yaml"]
+            }
+        }),
+        json!({
+            "name": "reload_workflows",
+            "description": "Reload all workflow definitions from ~/.nexus/workflows/. Picks up new, modified, and deleted workflow files.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "delete_workflow",
+            "description": "Delete a workflow definition. Removes the file from ~/.nexus/workflows/ and unloads it from the running server.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Workflow name to delete" }
+                },
+                "required": ["name"]
+            }
+        }),
+        // -- Tasks --
         json!({
             "name": "list_tasks",
             "description": "List all workflow task executions with their status.",
@@ -118,46 +135,26 @@ pub fn definitions() -> Vec<Value> {
 /// Dispatch a tool call and return the result as a string.
 pub async fn execute(name: &str, args: &Value, state: &SharedState) -> String {
     match name {
-        "list_rules" => list_rules(state).await,
-        "list_webhooks" => list_webhooks(state),
         "server_stats" => server_stats(state),
         "recent_events" => recent_events(args, state).await,
-        "enable_rule" => set_rule_enabled(args, state, true).await,
-        "disable_rule" => set_rule_enabled(args, state, false).await,
-        "reload_config" => reload_config(state).await,
         "refresh_github_token" => refresh_github_token(state).await,
         "check_update" => check_update(state).await,
         "apply_update" => apply_update(args, state).await,
-        "list_workflows" => list_workflows(state),
+        "list_workflows" => list_workflows(state).await,
+        "create_workflow" => create_workflow(args, state).await,
+        "get_workflow" => get_workflow(args, state).await,
+        "validate_workflow" => validate_workflow(args),
+        "reload_workflows" => reload_workflows(state).await,
+        "delete_workflow" => delete_workflow(args, state).await,
         "list_tasks" => list_tasks(state).await,
         "get_task" => get_task(args, state).await,
         _ => format!("Unknown tool: {name}"),
     }
 }
 
-async fn list_rules(state: &SharedState) -> String {
-    let rules = state.rules.read().await;
-    let list: Vec<Value> = rules
-        .iter()
-        .map(|r| {
-            json!({
-                "name": r.name,
-                "filter": r.filter.type_prefix,
-                "action": r.action,
-                "enabled": r.enabled,
-            })
-        })
-        .collect();
-    serde_json::to_string_pretty(&list).unwrap_or_default()
-}
-
-fn list_webhooks(state: &SharedState) -> String {
-    json!({
-        "source_count": state.source_count,
-        "note": "Source details are consumed during router initialization. Use /status for counts."
-    })
-    .to_string()
-}
+// ---------------------------------------------------------------------------
+// Server tools
+// ---------------------------------------------------------------------------
 
 fn server_stats(state: &SharedState) -> String {
     let stats = &state.stats;
@@ -168,8 +165,8 @@ fn server_stats(state: &SharedState) -> String {
         "uptime_seconds": uptime.num_seconds(),
         "events_received": stats.events_received.load(Ordering::Relaxed),
         "events_matched": stats.events_matched.load(Ordering::Relaxed),
-        "actions_succeeded": stats.actions_succeeded.load(Ordering::Relaxed),
-        "actions_failed": stats.actions_failed.load(Ordering::Relaxed),
+        "workflows_succeeded": stats.actions_succeeded.load(Ordering::Relaxed),
+        "workflows_failed": stats.actions_failed.load(Ordering::Relaxed),
         "sources": state.source_count,
     })
     .to_string()
@@ -180,37 +177,6 @@ async fn recent_events(args: &Value, state: &SharedState) -> String {
     let events = state.recent_events.lock().await;
     let recent: Vec<&crate::server::RecentEvent> = events.iter().rev().take(limit).collect();
     serde_json::to_string_pretty(&recent).unwrap_or_default()
-}
-
-async fn set_rule_enabled(args: &Value, state: &SharedState, enabled: bool) -> String {
-    let name = match args["name"].as_str() {
-        Some(n) => n,
-        None => return "Error: missing 'name' argument".to_string(),
-    };
-
-    let mut rules = state.rules.write().await;
-    if let Some(rule) = rules.iter_mut().find(|r| r.name == name) {
-        rule.enabled = enabled;
-        let action = if enabled { "enabled" } else { "disabled" };
-        format!("Rule '{}' {action}", rule.name)
-    } else {
-        let available: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
-        format!("Rule '{name}' not found. Available: {available:?}")
-    }
-}
-
-async fn reload_config(state: &SharedState) -> String {
-    let path = state.config_path.to_string_lossy().to_string();
-    // Convert the non-Send Box<dyn Error> to String before any .await
-    match Config::load(&path).map_err(|e| e.to_string()) {
-        Ok(new_config) => {
-            let count = new_config.rules.len();
-            let mut rules = state.rules.write().await;
-            *rules = new_config.rules;
-            format!("Config reloaded from {path}: {count} rules")
-        }
-        Err(e) => format!("Error reloading config: {e}"),
-    }
 }
 
 async fn refresh_github_token(state: &SharedState) -> String {
@@ -478,14 +444,190 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<bool, String> {
 // Workflow tools
 // ---------------------------------------------------------------------------
 
-fn list_workflows(state: &SharedState) -> String {
-    let names = state.workflow_store.names();
-    let list: Vec<Value> = names
+/// Resolve the workflows directory (~/.nexus/workflows/).
+fn workflows_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".nexus/workflows"))
+}
+
+async fn list_workflows(state: &SharedState) -> String {
+    let store = state.workflow_store.read().await;
+    let entries = store.list_with_triggers();
+    let list: Vec<Value> = entries
         .iter()
-        .map(|name| json!({ "name": name }))
+        .map(|(name, triggers)| {
+            let mut entry = json!({ "name": name });
+            if !triggers.is_empty() {
+                entry["triggers"] = json!(triggers);
+            }
+            entry
+        })
         .collect();
     serde_json::to_string_pretty(&list).unwrap_or_default()
 }
+
+async fn create_workflow(args: &Value, state: &SharedState) -> String {
+    let name = match args["name"].as_str() {
+        Some(n) => n,
+        None => return "Error: missing 'name' argument".to_string(),
+    };
+    let yaml = match args["yaml"].as_str() {
+        Some(y) => y,
+        None => return "Error: missing 'yaml' argument".to_string(),
+    };
+
+    // Validate YAML parses as a workflow
+    if let Err(e) = serde_yaml::from_str::<WorkflowDef>(yaml) {
+        return format!("Invalid workflow YAML: {e}");
+    }
+
+    // Write to ~/.nexus/workflows/{name}.yaml
+    let dir = match workflows_dir() {
+        Some(d) => d,
+        None => return "Error: cannot determine home directory".to_string(),
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return format!("Error creating workflows directory: {e}");
+    }
+    let path = dir.join(format!("{name}.yaml"));
+    if let Err(e) = std::fs::write(&path, yaml) {
+        return format!("Error writing workflow file: {e}");
+    }
+
+    // Load into the store
+    let mut store = state.workflow_store.write().await;
+    match store.load(name, &path) {
+        Ok(()) => json!({
+            "created": true,
+            "name": name,
+            "path": path.display().to_string(),
+        })
+        .to_string(),
+        Err(e) => format!("Workflow saved but failed to load: {e}"),
+    }
+}
+
+async fn get_workflow(args: &Value, state: &SharedState) -> String {
+    let name = match args["name"].as_str() {
+        Some(n) => n,
+        None => return "Error: missing 'name' argument".to_string(),
+    };
+
+    // Try to read the YAML source from disk
+    if let Some(dir) = workflows_dir() {
+        for ext in &["yaml", "yml"] {
+            let path = dir.join(format!("{name}.{ext}"));
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                return json!({
+                    "name": name,
+                    "path": path.display().to_string(),
+                    "yaml": content,
+                })
+                .to_string();
+            }
+        }
+    }
+
+    // Fallback: check if it's loaded but we can't read the source
+    let store = state.workflow_store.read().await;
+    if store.get(name).is_some() {
+        json!({
+            "name": name,
+            "loaded": true,
+            "note": "Workflow is loaded but YAML source file not found in ~/.nexus/workflows/"
+        })
+        .to_string()
+    } else {
+        format!("Workflow '{name}' not found")
+    }
+}
+
+fn validate_workflow(args: &Value) -> String {
+    let yaml = match args["yaml"].as_str() {
+        Some(y) => y,
+        None => return "Error: missing 'yaml' argument".to_string(),
+    };
+
+    match serde_yaml::from_str::<WorkflowDef>(yaml) {
+        Ok(def) => {
+            let step_count = def.do_.len();
+            json!({
+                "valid": true,
+                "steps": step_count,
+            })
+            .to_string()
+        }
+        Err(e) => {
+            json!({
+                "valid": false,
+                "error": e.to_string(),
+            })
+            .to_string()
+        }
+    }
+}
+
+async fn reload_workflows(state: &SharedState) -> String {
+    let dir = match workflows_dir() {
+        Some(d) => d,
+        None => return "Error: cannot determine home directory".to_string(),
+    };
+
+    let mut store = state.workflow_store.write().await;
+
+    // Full clear-and-reload — picks up new, modified, and deleted workflows
+    store.clear();
+    store.load_from_dir(&dir);
+
+    let names: Vec<String> = store.names().iter().map(|s| s.to_string()).collect();
+
+    json!({
+        "reloaded": true,
+        "directory": dir.display().to_string(),
+        "total_workflows": names.len(),
+        "workflows": names,
+    })
+    .to_string()
+}
+
+async fn delete_workflow(args: &Value, state: &SharedState) -> String {
+    let name = match args["name"].as_str() {
+        Some(n) => n,
+        None => return "Error: missing 'name' argument".to_string(),
+    };
+
+    // Remove from the in-memory store
+    let removed = {
+        let mut store = state.workflow_store.write().await;
+        store.remove(name)
+    };
+
+    if !removed {
+        return format!("Workflow '{name}' not found");
+    }
+
+    // Try to delete the file from disk
+    let mut file_deleted = false;
+    if let Some(dir) = workflows_dir() {
+        for ext in &["yaml", "yml"] {
+            let path = dir.join(format!("{name}.{ext}"));
+            if std::fs::remove_file(&path).is_ok() {
+                file_deleted = true;
+                break;
+            }
+        }
+    }
+
+    json!({
+        "deleted": true,
+        "name": name,
+        "file_deleted": file_deleted,
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Task tools
+// ---------------------------------------------------------------------------
 
 async fn list_tasks(state: &SharedState) -> String {
     let tasks = state.task_store.list().await;

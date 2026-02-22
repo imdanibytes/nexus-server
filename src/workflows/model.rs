@@ -13,9 +13,45 @@ pub struct WorkflowDef {
     /// Metadata about the workflow.
     #[serde(default)]
     pub document: Option<DocumentDef>,
+    /// Event triggers — CNCF `schedule.on` block.
+    /// Workflows with triggers are auto-dispatched when matching events arrive.
+    /// Workflows without triggers are only callable from other workflows.
+    #[serde(default)]
+    pub schedule: Option<ScheduleDef>,
     /// Top-level task list — sequential by default.
     #[serde(rename = "do")]
     pub do_: Vec<BTreeMap<String, TaskDef>>,
+}
+
+/// Schedule block — declares when this workflow should be triggered.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScheduleDef {
+    pub on: Option<EventTriggers>,
+}
+
+/// Container for event-based triggers.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventTriggers {
+    pub events: Vec<EventFilter>,
+}
+
+/// A single event filter within a trigger declaration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventFilter {
+    /// Match criteria for the CloudEvent.
+    #[serde(rename = "with")]
+    pub with: EventMatch,
+}
+
+/// Match criteria for a CloudEvent.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventMatch {
+    /// CloudEvent type — matched as a prefix (e.g. `com.github.issues` matches `com.github.issues.opened`).
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// CloudEvent source — exact match if specified.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// Workflow document metadata.
@@ -175,6 +211,44 @@ impl TaskDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_schedule_triggers() {
+        let yaml = r#"
+schedule:
+  on:
+    events:
+      - with:
+          type: com.github.issues.opened
+      - with:
+          type: com.github.pull_request
+          source: my-org/my-repo
+do:
+  - step:
+      set:
+        x: 1
+"#;
+        let wf: WorkflowDef = serde_yaml::from_str(yaml).unwrap();
+        let schedule = wf.schedule.as_ref().unwrap();
+        let triggers = schedule.on.as_ref().unwrap();
+        assert_eq!(triggers.events.len(), 2);
+        assert_eq!(triggers.events[0].with.type_, "com.github.issues.opened");
+        assert!(triggers.events[0].with.source.is_none());
+        assert_eq!(triggers.events[1].with.type_, "com.github.pull_request");
+        assert_eq!(triggers.events[1].with.source.as_deref(), Some("my-org/my-repo"));
+    }
+
+    #[test]
+    fn parse_no_schedule() {
+        let yaml = r#"
+do:
+  - step:
+      set:
+        x: 1
+"#;
+        let wf: WorkflowDef = serde_yaml::from_str(yaml).unwrap();
+        assert!(wf.schedule.is_none());
+    }
 
     #[test]
     fn parse_sequential_workflow() {

@@ -4,6 +4,12 @@ document:
   name: try-catch-test
   version: "0.1.0"
 
+schedule:
+  on:
+    events:
+      - with:
+          type: com.test.trycatch
+
 # Tests try/catch/finally:
 # 1. try block calls a nonexistent HTTP endpoint (will fail)
 # 2. catch block captures the error

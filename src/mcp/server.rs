@@ -36,7 +36,7 @@ impl ServerHandler for NexusMcpServer {
                 website_url: None,
             },
             instructions: Some(
-                "Nexus webhook automation server — manage rules, view stats, and control the running instance."
+                "Nexus webhook automation server — manage workflows, view stats, and control the running instance."
                     .to_string(),
             ),
         }

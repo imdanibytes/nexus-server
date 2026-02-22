@@ -348,17 +348,15 @@ mod tests {
         use crate::workflows::WorkflowStore;
 
         Arc::new(SharedState {
-            rules: tokio::sync::RwLock::new(vec![]),
             claude: None,
             github_token_env: "GITHUB_TOKEN".into(),
             github_app: None,
             http_client: reqwest::Client::new(),
             source_count: 0,
-            config_path: std::path::PathBuf::new(),
             stats: crate::server::ServerStats::new(),
             recent_events: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
             seen_deliveries: tokio::sync::Mutex::new(crate::server::DeliveryTracker::new()),
-            workflow_store: WorkflowStore::new(),
+            workflow_store: tokio::sync::RwLock::new(WorkflowStore::new()),
             task_store: TaskStore::new(),
             sandbox_registry: SandboxRegistry::new(),
         })

@@ -1,9 +1,7 @@
-mod actions;
 mod agent;
 mod config;
 mod github_auth;
 mod mcp;
-mod routing;
 mod sandbox;
 mod server;
 mod sources;
@@ -48,11 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         bind = %bind,
         sources = config.sources.len(),
-        rules = config.rules.len(),
         "starting nexus-server"
     );
 
-    let router = server::build_router(config, cli.config.into());
+    let router = server::build_router(config);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     let local_addr = listener.local_addr()?;
     info!("listening on {local_addr}");

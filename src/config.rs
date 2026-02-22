@@ -11,10 +11,6 @@ pub struct Config {
     pub github: Option<GithubConfig>,
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
-    #[serde(default)]
-    pub rules: Vec<RuleConfig>,
-    #[serde(default)]
-    pub workflows: Vec<WorkflowConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,39 +80,6 @@ pub struct VerificationConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct RuleConfig {
-    pub name: String,
-    pub filter: FilterConfig,
-    pub action: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub prompt: Option<String>,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub body_template: Option<String>,
-    #[serde(default)]
-    pub target: Option<String>,
-    #[serde(default)]
-    pub target_secret_env: Option<String>,
-    /// Workflow name to execute (for `action = "workflow"`).
-    #[serde(default)]
-    pub workflow: Option<String>,
-    /// Enable sandbox (for `action = "agent"` — clones repo and runs in container).
-    #[serde(default)]
-    pub sandbox: bool,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct WorkflowConfig {
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct GithubConfig {
     #[serde(default = "default_github_token_env")]
     pub token_env: String,
@@ -128,11 +91,6 @@ pub struct GithubConfig {
 
 fn default_github_token_env() -> String {
     "GITHUB_TOKEN".to_string()
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct FilterConfig {
-    pub type_prefix: String,
 }
 
 impl Config {
@@ -170,19 +128,6 @@ id = "events"
 type = "cloudevents"
 path = "/events"
 secret_env = "EVENTS_TOKEN"
-
-[[rules]]
-name = "Test rule"
-filter = { type_prefix = "com.github.issues" }
-action = "claude"
-prompt = "Hello {{event.data.issue.title}}"
-
-[[rules]]
-name = "Forward to dev"
-filter = { type_prefix = "com.github" }
-action = "forward"
-target = "http://localhost:8091/events"
-target_secret_env = "DEV_EVENTS_TOKEN"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.bind, "127.0.0.1:9000");
@@ -191,38 +136,8 @@ target_secret_env = "DEV_EVENTS_TOKEN"
         assert_eq!(config.sources[0].type_, "github");
         assert_eq!(config.sources[1].id, "events");
         assert_eq!(config.sources[1].type_, "cloudevents");
-        assert_eq!(config.rules.len(), 2);
-        assert_eq!(config.rules[0].action, "claude");
-        assert_eq!(config.rules[1].action, "forward");
-        assert_eq!(
-            config.rules[1].target.as_deref(),
-            Some("http://localhost:8091/events")
-        );
         let claude = config.claude.unwrap();
         assert_eq!(claude.max_tokens, 2048);
-    }
-
-    #[test]
-    fn parse_workflow_config() {
-        let toml = r#"
-[server]
-
-[[workflows]]
-name = "coding-agent"
-path = "workflows/coding-agent.yaml"
-
-[[rules]]
-name = "Issue → workflow"
-filter = { type_prefix = "com.github.issues" }
-action = "workflow"
-workflow = "coding-agent"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.workflows.len(), 1);
-        assert_eq!(config.workflows[0].name, "coding-agent");
-        assert_eq!(config.workflows[0].path, "workflows/coding-agent.yaml");
-        assert_eq!(config.rules[0].action, "workflow");
-        assert_eq!(config.rules[0].workflow.as_deref(), Some("coding-agent"));
     }
 
     #[test]
@@ -234,6 +149,5 @@ workflow = "coding-agent"
         assert_eq!(config.server.bind, "0.0.0.0:8090");
         assert!(config.claude.is_none());
         assert!(config.sources.is_empty());
-        assert!(config.rules.is_empty());
     }
 }

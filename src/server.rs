@@ -1,5 +1,4 @@
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -17,10 +16,7 @@ use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::actions::{self, ActionRegistry};
-use crate::config::RuleConfig;
 use crate::github_auth::GitHubAppAuth;
-use crate::routing::match_rules;
 use crate::sandbox::SandboxRegistry;
 use crate::sources::{self, Source};
 use crate::workflows::task::TaskStore;
@@ -37,17 +33,15 @@ const MAX_RECENT_EVENTS: usize = 100;
 
 /// Shared state across all routes.
 pub struct SharedState {
-    pub rules: RwLock<Vec<RuleConfig>>,
     pub claude: Option<crate::config::ClaudeConfig>,
     pub github_token_env: String,
     pub github_app: Option<GitHubAppAuth>,
     pub http_client: reqwest::Client,
     pub source_count: usize,
-    pub config_path: PathBuf,
     pub stats: ServerStats,
     pub recent_events: Mutex<VecDeque<RecentEvent>>,
     pub seen_deliveries: Mutex<DeliveryTracker>,
-    pub workflow_store: WorkflowStore,
+    pub workflow_store: RwLock<WorkflowStore>,
     pub task_store: TaskStore,
     pub sandbox_registry: SandboxRegistry,
 }
@@ -78,7 +72,7 @@ impl ServerStats {
 pub struct RecentEvent {
     pub event_type: String,
     pub source: String,
-    pub matched_rules: Vec<String>,
+    pub matched_workflows: Vec<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -131,10 +125,9 @@ impl SharedState {
 struct SourceState {
     shared: Arc<SharedState>,
     source: Arc<dyn Source>,
-    registry: Arc<ActionRegistry>,
 }
 
-pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Router {
+pub fn build_router(config: crate::config::Config) -> Router {
     let http_client = reqwest::Client::new();
 
     let github_token_env = config
@@ -165,34 +158,25 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         }
     });
 
-    // Load workflow definitions
+    // Auto-discover workflow definitions from ~/.nexus/workflows/
     let mut workflow_store = WorkflowStore::new();
-    for wf_config in &config.workflows {
-        let wf_path = std::path::Path::new(&wf_config.path);
-        match workflow_store.load(&wf_config.name, wf_path) {
-            Ok(()) => info!(name = %wf_config.name, path = %wf_config.path, "loaded workflow"),
-            Err(e) => error!(name = %wf_config.name, error = %e, "failed to load workflow"),
-        }
-    }
+    workflow_store.load_from_default_dir();
+
+    let workflow_count = workflow_store.names().len();
 
     let shared = Arc::new(SharedState {
         source_count: config.sources.len(),
-        rules: RwLock::new(config.rules),
         claude: config.claude,
         github_token_env,
         github_app,
         http_client,
-        config_path,
         stats: ServerStats::new(),
         recent_events: Mutex::new(VecDeque::new()),
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
-        workflow_store,
+        workflow_store: RwLock::new(workflow_store),
         task_store: TaskStore::new(),
         sandbox_registry: SandboxRegistry::new(),
     });
-
-    // Build action registry after shared state — AgentAction needs Arc<SharedState>
-    let registry = Arc::new(ActionRegistry::new(&shared));
 
     let mut router = Router::new()
         .route("/health", get(health))
@@ -201,10 +185,10 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
             get({
                 let shared = shared.clone();
                 move || async move {
-                    let rules_count = shared.rules.read().await.len();
+                    let wf_count = shared.workflow_store.read().await.names().len();
                     axum::Json(json!({
                         "sources": shared.source_count,
-                        "rules": rules_count,
+                        "workflows": wf_count,
                     }))
                 }
             }),
@@ -237,7 +221,6 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
                 let state = SourceState {
                     shared: shared.clone(),
                     source,
-                    registry: registry.clone(),
                 };
 
                 router = router.route(
@@ -264,6 +247,12 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
             }
         }
     }
+
+    info!(
+        sources = config.sources.len(),
+        workflows = workflow_count,
+        "router built"
+    );
 
     // Mount MCP management endpoint
     router = crate::mcp::mount(router, shared);
@@ -320,7 +309,7 @@ async fn handle_source(
         "received event"
     );
 
-    dispatch_event(&event, &state.shared, &state.registry).await
+    dispatch_event(&event, &state.shared).await
 }
 
 /// CloudEvents HTTP Webhook spec: OPTIONS validation handshake.
@@ -340,44 +329,45 @@ async fn handle_events_options(headers: HeaderMap) -> impl IntoResponse {
     )
 }
 
-/// Shared dispatch pipeline — matches rules and executes actions.
+/// Dispatch pipeline — matches workflow triggers and spawns executions.
 async fn dispatch_event(
     event: &Event,
     shared: &Arc<SharedState>,
-    registry: &ActionRegistry,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     shared.stats.events_received.fetch_add(1, Ordering::Relaxed);
 
-    let rules = shared.rules.read().await;
-    let matched = match_rules(event, &rules);
+    let matched = {
+        let store = shared.workflow_store.read().await;
+        store.match_triggers(event)
+    };
+
     if matched.is_empty() {
-        info!(event_type = %event.ty(), "no rules matched");
-        return Ok(axum::Json(json!({"matched_rules": 0})));
+        info!(event_type = %event.ty(), "no workflows matched");
+        return Ok(axum::Json(json!({"matched_workflows": 0})));
     }
 
     shared.stats.events_matched.fetch_add(1, Ordering::Relaxed);
-    let matched_names: Vec<String> = matched.iter().map(|r| r.name.clone()).collect();
+    let matched_names: Vec<String> = matched.iter().map(|(name, _)| name.clone()).collect();
 
     info!(
         event_type = %event.ty(),
         matched = matched.len(),
-        "dispatching matched rules"
+        "dispatching to matched workflows"
     );
 
-    for rule in &matched {
-        info!(rule = %rule.name, action = %rule.action, "executing rule");
-        if let Err(e) = actions::dispatch(rule, event, registry).await
-        {
-            shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
-            error!(rule = %rule.name, error = %e, "action failed");
-        } else {
-            shared
-                .stats
-                .actions_succeeded
-                .fetch_add(1, Ordering::Relaxed);
+    for (name, def) in &matched {
+        info!(workflow = %name, "spawning workflow");
+        match shared.task_store.spawn(name, def, event, shared).await {
+            Ok((task_id, _output)) => {
+                shared.stats.actions_succeeded.fetch_add(1, Ordering::Relaxed);
+                info!(workflow = %name, task_id = %task_id, "workflow completed");
+            }
+            Err(e) => {
+                shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
+                error!(workflow = %name, error = %e, "workflow failed");
+            }
         }
     }
-    drop(rules);
 
     // Record recent event
     let mut recent = shared.recent_events.lock().await;
@@ -387,11 +377,11 @@ async fn dispatch_event(
     recent.push_back(RecentEvent {
         event_type: event.ty().to_string(),
         source: event.source().to_string(),
-        matched_rules: matched_names.clone(),
+        matched_workflows: matched_names.clone(),
         timestamp: event.time().copied().unwrap_or_else(Utc::now),
     });
 
-    Ok(axum::Json(json!({"matched_rules": matched_names.len()})))
+    Ok(axum::Json(json!({"matched_workflows": matched_names.len()})))
 }
 
 #[cfg(test)]
