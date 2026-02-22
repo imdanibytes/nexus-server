@@ -105,6 +105,9 @@ pub struct RuleConfig {
     /// Workflow name to execute (for `action = "workflow"`).
     #[serde(default)]
     pub workflow: Option<String>,
+    /// Enable sandbox (for `action = "agent"` — clones repo and runs in container).
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

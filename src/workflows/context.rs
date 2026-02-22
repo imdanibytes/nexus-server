@@ -2,11 +2,14 @@
 
 use cloudevents::event::AttributesReader;
 use cloudevents::Event;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::checkpoint::CheckpointContext;
 use super::expressions;
 
 /// Mutable state carried through workflow execution.
+#[derive(Serialize, Deserialize)]
 pub struct WorkflowContext {
     /// The triggering CloudEvent's data (immutable).
     pub event: Value,
@@ -40,6 +43,26 @@ impl WorkflowContext {
             input: event_data,
             output: Value::Null,
             event: event_value,
+        }
+    }
+
+    /// Restore context from a checkpoint snapshot.
+    pub fn from_checkpoint(snap: &CheckpointContext) -> Self {
+        Self {
+            event: snap.event.clone(),
+            context: snap.context.clone(),
+            input: snap.input.clone(),
+            output: snap.output.clone(),
+        }
+    }
+
+    /// Snapshot the current context for checkpointing.
+    pub fn to_checkpoint_context(&self) -> CheckpointContext {
+        CheckpointContext {
+            event: self.event.clone(),
+            context: self.context.clone(),
+            input: self.input.clone(),
+            output: self.output.clone(),
         }
     }
 

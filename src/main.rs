@@ -4,6 +4,7 @@ mod config;
 mod github_auth;
 mod mcp;
 mod routing;
+mod sandbox;
 mod server;
 mod sources;
 mod verification;

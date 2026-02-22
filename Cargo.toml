@@ -39,3 +39,6 @@ jaq-core = "1"
 jaq-interpret = "1"
 jaq-parse = "1"
 jaq-std = "1"
+
+[dev-dependencies]
+tempfile = "3.25.0"

@@ -77,6 +77,7 @@ mod tests {
             target: None,
             target_secret_env: None,
             workflow: None,
+            sandbox: false,
         }
     }
 

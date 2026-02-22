@@ -47,7 +47,7 @@ impl super::Action for WorkflowAction {
 
             let (task_id, _output) = shared
                 .task_store
-                .spawn(workflow_name, def, &event, &shared.http_client)
+                .spawn(workflow_name, def, &event, &shared)
                 .await
                 .map_err(|e| ActionError::Execute(e.to_string()))?;
 

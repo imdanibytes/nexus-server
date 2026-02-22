@@ -79,6 +79,9 @@ pub struct TaskDef {
     /// Flow directive: "continue", "exit", or a task name to jump to.
     #[serde(default)]
     pub then: Option<String>,
+    /// Per-step timeout in milliseconds. Overrides the handle's default.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// Try block — contains tasks to attempt.

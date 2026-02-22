@@ -5,10 +5,13 @@
 //! Expression language: jq via jaq.
 //! Extension: `finally` block on try/catch for guaranteed cleanup.
 
+pub mod audit;
+pub mod checkpoint;
 pub mod context;
 pub mod error;
 pub mod executor;
 pub mod expressions;
+pub mod handle;
 pub mod model;
 pub mod task;
 pub mod tasks;

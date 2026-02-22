@@ -1,0 +1,47 @@
+document:
+  dsl: "1.0.0"
+  namespace: nexus
+  name: try-catch-test
+  version: "0.1.0"
+
+# Tests try/catch/finally:
+# 1. try block calls a nonexistent HTTP endpoint (will fail)
+# 2. catch block captures the error
+# 3. finally block always runs for cleanup
+do:
+  - init:
+      set:
+        stage: "starting"
+        cleanup_ran: false
+
+  - protected:
+      try:
+        do:
+          - riskyCall:
+              call: http
+              with:
+                method: get
+                endpoint: "http://localhost:19999/this-will-fail"
+          - neverReached:
+              set:
+                stage: "this should not run"
+      catch:
+        as: err
+        do:
+          - handleError:
+              set:
+                stage: "caught"
+                error_captured: true
+      finally:
+        do:
+          - cleanup:
+              set:
+                cleanup_ran: true
+                stage: "${ \"finished (was: \" + .stage + \")\" }"
+
+  - summary:
+      set:
+        result:
+          cleanup_ran: "${ .cleanup_ran }"
+          stage: "${ .stage }"
+          error_captured: "${ .error_captured // false }"

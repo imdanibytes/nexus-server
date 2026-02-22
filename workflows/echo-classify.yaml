@@ -1,0 +1,45 @@
+document:
+  dsl: "1.0.0"
+  namespace: nexus
+  name: echo-classify
+  version: "0.1.0"
+
+# Simple test workflow:
+# 1. Extract event fields into context
+# 2. Classify by priority (high vs normal)
+# 3. Build a response message
+do:
+  - extractEvent:
+      set:
+        event_type: "${ $event.type }"
+        source: "${ $event.source }"
+        title: "${ .title // \"untitled\" }"
+        priority: "${ .priority // \"normal\" }"
+
+  - classify:
+      switch:
+        - highPriority:
+            when: ".priority == \"high\""
+            then: handleHigh
+        - default:
+            then: handleNormal
+
+  - handleNormal:
+      set:
+        classification: "normal"
+        message: "${ \"Processed normal-priority event: \" + .title }"
+      then: buildResponse
+
+  - handleHigh:
+      set:
+        classification: "high"
+        message: "${ \"URGENT: \" + .title }"
+
+  - buildResponse:
+      set:
+        response:
+          event_type: "${ .event_type }"
+          source: "${ .source }"
+          classification: "${ .classification }"
+          message: "${ .message }"
+          processed: true

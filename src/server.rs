@@ -21,6 +21,7 @@ use crate::actions::{self, ActionRegistry};
 use crate::config::RuleConfig;
 use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
+use crate::sandbox::SandboxRegistry;
 use crate::sources::{self, Source};
 use crate::workflows::task::TaskStore;
 use crate::workflows::WorkflowStore;
@@ -48,6 +49,7 @@ pub struct SharedState {
     pub seen_deliveries: Mutex<DeliveryTracker>,
     pub workflow_store: WorkflowStore,
     pub task_store: TaskStore,
+    pub sandbox_registry: SandboxRegistry,
 }
 
 /// Server-wide counters. Atomics — no locks needed for reads.
@@ -186,6 +188,7 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
         workflow_store,
         task_store: TaskStore::new(),
+        sandbox_registry: SandboxRegistry::new(),
     });
 
     // Build action registry after shared state — AgentAction needs Arc<SharedState>

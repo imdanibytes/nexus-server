@@ -15,4 +15,10 @@ pub enum WorkflowError {
 
     #[error("workflow not found: {0}")]
     NotFound(String),
+
+    #[error("workflow cancelled")]
+    Cancelled,
+
+    #[error("step '{step_name}' timed out after {duration_ms}ms")]
+    StepTimeout { step_name: String, duration_ms: u64 },
 }

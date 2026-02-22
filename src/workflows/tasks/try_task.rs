@@ -3,27 +3,30 @@
 //! `finally` is a nexus extension to the CNCF Serverless Workflow spec.
 //! It guarantees cleanup runs regardless of success or failure.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use tracing::info;
 
+use crate::server::SharedState;
 use crate::workflows::context::WorkflowContext;
 use crate::workflows::error::WorkflowError;
 use crate::workflows::executor::{self, Outcome};
+use crate::workflows::handle::ExecutionHandle;
 use crate::workflows::model::TaskDef;
 
 /// Execute a `try`/`catch`/`finally` task.
 ///
 /// Execution order:
 /// 1. `try` block runs.
-/// 2. If it fails → `catch` block runs with error in context.
+/// 2. If it fails -> `catch` block runs with error in context.
 /// 3. `finally` block always runs, regardless of outcome.
 /// 4. If `finally` fails, its error takes precedence.
 pub async fn execute(
     task: &TaskDef,
     ctx: &mut WorkflowContext,
-    client: &reqwest::Client,
-    steps: &mut usize,
-    max_steps: usize,
+    shared: &Arc<SharedState>,
+    handle: &ExecutionHandle,
 ) -> Result<Outcome, WorkflowError> {
     let try_block = task
         .try_
@@ -32,7 +35,7 @@ pub async fn execute(
 
     // 1. Run try block
     let try_result =
-        executor::execute_task_list(&try_block.do_, ctx, client, steps, max_steps).await;
+        executor::execute_task_list(&try_block.do_, ctx, shared, handle).await;
 
     let mut outcome = Outcome::Completed;
     let mut deferred_error: Option<WorkflowError> = None;
@@ -53,7 +56,7 @@ pub async fn execute(
                     map.insert(error_var.to_string(), error_value);
                 }
 
-                match executor::execute_task_list(&catch.do_, ctx, client, steps, max_steps).await
+                match executor::execute_task_list(&catch.do_, ctx, shared, handle).await
                 {
                     Ok(Outcome::Exited) => outcome = Outcome::Exited,
                     Ok(Outcome::Completed) => {}
@@ -70,7 +73,7 @@ pub async fn execute(
     if let Some(ref finally) = task.finally {
         info!("workflow: running finally block");
         if let Err(finally_err) =
-            executor::execute_task_list(&finally.do_, ctx, client, steps, max_steps).await
+            executor::execute_task_list(&finally.do_, ctx, shared, handle).await
         {
             // Finally error takes precedence
             return Err(finally_err);
