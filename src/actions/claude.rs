@@ -1,6 +1,46 @@
-use crate::config::ClaudeConfig;
+use crate::config::{ClaudeConfig, RuleConfig};
+use crate::routing::resolve_template;
+use cloudevents::Event;
 use serde_json::json;
 use tracing::{error, info};
+
+use super::{Action, ActionError};
+
+pub struct ClaudeAction {
+    config: ClaudeConfig,
+    client: reqwest::Client,
+}
+
+impl ClaudeAction {
+    pub fn new(config: ClaudeConfig, client: reqwest::Client) -> Self {
+        Self { config, client }
+    }
+}
+
+impl Action for ClaudeAction {
+    fn action_type(&self) -> &str {
+        "claude"
+    }
+
+    fn execute(
+        &self,
+        rule: &RuleConfig,
+        event: &Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ActionError>> + Send + '_>>
+    {
+        let prompt_template = rule.prompt.clone();
+        let rule_name = rule.name.clone();
+        let event = event.clone();
+        Box::pin(async move {
+            let template = prompt_template
+                .as_deref()
+                .ok_or_else(|| ActionError::Config(format!("prompt missing on rule '{rule_name}'")))?;
+            let prompt = resolve_template(template, &event);
+            call(&self.config, &prompt, &self.client).await?;
+            Ok(())
+        })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaudeError {
@@ -10,6 +50,12 @@ pub enum ClaudeError {
     Request(#[from] reqwest::Error),
     #[error("API returned {status}: {body}")]
     ApiError { status: u16, body: String },
+}
+
+impl From<ClaudeError> for ActionError {
+    fn from(e: ClaudeError) -> Self {
+        ActionError::Execute(e.to_string())
+    }
 }
 
 pub async fn call(

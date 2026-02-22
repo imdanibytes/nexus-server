@@ -17,8 +17,8 @@ use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::actions;
-use crate::config::{ClaudeConfig, RuleConfig};
+use crate::actions::{self, ActionRegistry};
+use crate::config::RuleConfig;
 use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
 use crate::sources::{self, Source};
@@ -35,7 +35,7 @@ const MAX_RECENT_EVENTS: usize = 100;
 /// Shared state across all routes.
 pub struct SharedState {
     pub rules: RwLock<Vec<RuleConfig>>,
-    pub claude: Option<ClaudeConfig>,
+    pub claude: Option<crate::config::ClaudeConfig>,
     pub github_token_env: String,
     pub github_app: Option<GitHubAppAuth>,
     pub http_client: reqwest::Client,
@@ -125,6 +125,7 @@ impl SharedState {
 struct SourceState {
     shared: Arc<SharedState>,
     source: Arc<dyn Source>,
+    registry: Arc<ActionRegistry>,
 }
 
 pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Router {
@@ -171,6 +172,9 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
     });
 
+    // Build action registry after shared state — AgentAction needs Arc<SharedState>
+    let registry = Arc::new(ActionRegistry::new(&shared));
+
     let mut router = Router::new()
         .route("/health", get(health))
         .route(
@@ -214,6 +218,7 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
                 let state = SourceState {
                     shared: shared.clone(),
                     source,
+                    registry: registry.clone(),
                 };
 
                 router = router.route(
@@ -296,7 +301,7 @@ async fn handle_source(
         "received event"
     );
 
-    dispatch_event(&event, &state.shared).await
+    dispatch_event(&event, &state.shared, &state.registry).await
 }
 
 /// CloudEvents HTTP Webhook spec: OPTIONS validation handshake.
@@ -320,6 +325,7 @@ async fn handle_events_options(headers: HeaderMap) -> impl IntoResponse {
 async fn dispatch_event(
     event: &Event,
     shared: &Arc<SharedState>,
+    registry: &ActionRegistry,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     shared.stats.events_received.fetch_add(1, Ordering::Relaxed);
 
@@ -339,17 +345,9 @@ async fn dispatch_event(
         "dispatching matched rules"
     );
 
-    let claude_config = shared.claude.as_ref();
     for rule in &matched {
         info!(rule = %rule.name, action = %rule.action, "executing rule");
-        if let Err(e) = actions::dispatch(
-            rule,
-            event,
-            claude_config,
-            shared,
-            &shared.http_client,
-        )
-        .await
+        if let Err(e) = actions::dispatch(rule, event, registry).await
         {
             shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
             error!(rule = %rule.name, error = %e, "action failed");

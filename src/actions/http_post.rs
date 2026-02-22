@@ -1,4 +1,47 @@
+use crate::config::RuleConfig;
+use crate::routing::resolve_template;
+use cloudevents::Event;
 use tracing::{error, info};
+
+use super::{Action, ActionError};
+
+pub struct HttpPostAction {
+    client: reqwest::Client,
+}
+
+impl HttpPostAction {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+}
+
+impl Action for HttpPostAction {
+    fn action_type(&self) -> &str {
+        "http_post"
+    }
+
+    fn execute(
+        &self,
+        rule: &RuleConfig,
+        event: &Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ActionError>> + Send + '_>>
+    {
+        let url = rule.url.clone();
+        let rule_name = rule.name.clone();
+        let body = rule
+            .body_template
+            .as_deref()
+            .map(|t| resolve_template(t, event))
+            .unwrap_or_default();
+        Box::pin(async move {
+            let url = url
+                .as_deref()
+                .ok_or_else(|| ActionError::Config(format!("url missing on rule '{rule_name}'")))?;
+            call(url, &body, &self.client).await?;
+            Ok(())
+        })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpPostError {
@@ -6,6 +49,12 @@ pub enum HttpPostError {
     Request(#[from] reqwest::Error),
     #[error("endpoint returned {status}: {body}")]
     BadStatus { status: u16, body: String },
+}
+
+impl From<HttpPostError> for ActionError {
+    fn from(e: HttpPostError) -> Self {
+        ActionError::Execute(e.to_string())
+    }
 }
 
 pub async fn call(
