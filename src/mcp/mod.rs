@@ -17,7 +17,7 @@ use crate::server::SharedState;
 pub fn mount(router: Router, shared: Arc<SharedState>) -> Router {
     let cancel = CancellationToken::new();
     let config = StreamableHttpServerConfig {
-        stateful_mode: true,
+        stateful_mode: false,
         cancellation_token: cancel.clone(),
         ..Default::default()
     };
