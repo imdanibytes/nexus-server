@@ -1,26 +1,31 @@
-use crate::cloud_event::CloudEvent;
 use crate::config::RuleConfig;
+use cloudevents::event::AttributesReader;
+use cloudevents::Event;
 use regex::Regex;
 
 /// Return all rules whose filter matches the event type.
 pub fn match_rules<'a>(
-    event: &CloudEvent,
+    event: &Event,
     rules: &'a [RuleConfig],
 ) -> Vec<&'a RuleConfig> {
     rules
         .iter()
-        .filter(|r| r.enabled && event.type_.starts_with(&r.filter.type_prefix))
+        .filter(|r| r.enabled && event.ty().starts_with(&r.filter.type_prefix))
         .collect()
 }
 
 /// Resolve `{{event.data.x.y}}` template expressions against the event.
 ///
 /// Supports dotted paths into the JSON data. Missing paths resolve to an empty string.
-pub fn resolve_template(template: &str, event: &CloudEvent) -> String {
+pub fn resolve_template(template: &str, event: &Event) -> String {
     let re = Regex::new(r"\{\{event\.data\.([^}]+)\}\}").unwrap();
     re.replace_all(template, |caps: &regex::Captures| {
         let path = &caps[1];
-        resolve_json_path(&event.data, path)
+        let json_data = match event.data() {
+            Some(cloudevents::Data::Json(v)) => v,
+            _ => return String::new(),
+        };
+        resolve_json_path(json_data, path)
     })
     .into_owned()
 }
@@ -44,10 +49,17 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::FilterConfig;
+    use cloudevents::{EventBuilder, EventBuilderV10};
     use serde_json::json;
 
-    fn make_event(type_: &str, data: serde_json::Value) -> CloudEvent {
-        CloudEvent::new(type_.to_string(), "test".to_string(), data)
+    fn make_event(type_: &str, data: serde_json::Value) -> Event {
+        EventBuilderV10::new()
+            .id(uuid::Uuid::new_v4().to_string())
+            .ty(type_)
+            .source("test")
+            .data("application/json", data)
+            .build()
+            .expect("valid test event")
     }
 
     fn make_rule(name: &str, prefix: &str, action: &str) -> RuleConfig {
@@ -62,6 +74,8 @@ mod tests {
             system_prompt: None,
             url: None,
             body_template: None,
+            target: None,
+            target_secret_env: None,
         }
     }
 

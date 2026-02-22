@@ -10,13 +10,14 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
+use cloudevents::event::AttributesReader;
+use cloudevents::{Event, EventBuilder, EventBuilderV10};
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::actions;
-use crate::cloud_event::CloudEvent;
 use crate::config::{ClaudeConfig, RuleConfig, VerificationConfig, WebhookConfig};
 use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
@@ -44,6 +45,8 @@ pub struct SharedState {
     pub recent_events: Mutex<VecDeque<RecentEvent>>,
     /// Recently seen delivery IDs for replay protection.
     pub seen_deliveries: Mutex<DeliveryTracker>,
+    /// Shared secret for the /events endpoint. None = endpoint disabled.
+    pub events_secret: Option<String>,
 }
 
 /// Server-wide counters. Atomics — no locks needed for reads.
@@ -162,6 +165,16 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
             }
         });
 
+    let events_secret = config
+        .server
+        .ingest_secret_env
+        .as_deref()
+        .and_then(|env_name| {
+            std::env::var(env_name)
+                .map_err(|_| warn!(env = env_name, "events secret env var not set — /events disabled"))
+                .ok()
+        });
+
     let shared = Arc::new(SharedState {
         webhook_count: config.webhooks.len(),
         rules: RwLock::new(config.rules),
@@ -173,6 +186,7 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         stats: ServerStats::new(),
         recent_events: Mutex::new(VecDeque::new()),
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
+        events_secret,
     });
 
     let mut router = Router::new()
@@ -219,6 +233,22 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
                 .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
                 .with_state(wh_state),
         );
+    }
+
+    // Mount CloudEvents receiver (spec-compliant OPTIONS handshake + Bearer auth)
+    if shared.events_secret.is_some() {
+        info!("mounting /events endpoint (CloudEvents HTTP Webhook spec)");
+        router = router
+            .route(
+                "/events",
+                post(handle_events)
+                    .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+                    .with_state(shared.clone()),
+            )
+            .route(
+                "/events",
+                axum::routing::options(handle_events_options),
+            );
     }
 
     // Mount MCP management endpoint
@@ -273,65 +303,125 @@ async fn handle_webhook(
     // Build CloudEvent
     let event = build_cloud_event(webhook, &headers, data);
     info!(
-        event_type = %event.type_,
-        event_id = %event.id,
+        event_type = %event.ty(),
+        event_id = %event.id(),
         webhook = %webhook.id,
         "received webhook event"
     );
 
-    state.shared.stats.events_received.fetch_add(1, Ordering::Relaxed);
+    dispatch_event(&event, &state.shared).await
+}
 
-    // Match rules and dispatch
-    let rules = state.shared.rules.read().await;
-    let matched = match_rules(&event, &rules);
+/// CloudEvents HTTP Webhook spec: OPTIONS validation handshake.
+/// Responds with WebHook-Allowed-Origin to grant delivery permission.
+async fn handle_events_options(headers: HeaderMap) -> impl IntoResponse {
+    let origin = headers
+        .get("webhook-request-origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("*");
+
+    (
+        StatusCode::OK,
+        [
+            ("webhook-allowed-origin", origin.to_string()),
+            ("webhook-allowed-rate", "*".to_string()),
+            ("allow", "POST".to_string()),
+        ],
+    )
+}
+
+/// CloudEvents receiver endpoint. Accepts events in both binary and structured
+/// mode via the cloudevents-sdk axum extractor. Protected by Bearer token.
+async fn handle_events(
+    State(shared): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    event: Event,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Verify bearer token
+    let expected = shared.events_secret.as_deref().ok_or_else(|| {
+        error!("events endpoint hit but no secret configured");
+        StatusCode::NOT_FOUND
+    })?;
+
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            warn!("events: missing or malformed Authorization header");
+            StatusCode::UNAUTHORIZED
+        })?;
+
+    if provided != expected {
+        warn!("events: invalid bearer token");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    info!(
+        event_type = %event.ty(),
+        event_id = %event.id(),
+        source = %event.source(),
+        "received CloudEvent from peer"
+    );
+
+    dispatch_event(&event, &shared).await
+}
+
+/// Shared dispatch pipeline — matches rules and executes actions.
+/// Used by both the webhook handler and the CloudEvents receiver.
+async fn dispatch_event(
+    event: &Event,
+    shared: &Arc<SharedState>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    shared.stats.events_received.fetch_add(1, Ordering::Relaxed);
+
+    let rules = shared.rules.read().await;
+    let matched = match_rules(event, &rules);
     if matched.is_empty() {
-        info!(event_type = %event.type_, "no rules matched");
+        info!(event_type = %event.ty(), "no rules matched");
         return Ok(axum::Json(json!({"matched_rules": 0})));
     }
 
-    state.shared.stats.events_matched.fetch_add(1, Ordering::Relaxed);
-
+    shared.stats.events_matched.fetch_add(1, Ordering::Relaxed);
     let matched_names: Vec<String> = matched.iter().map(|r| r.name.clone()).collect();
 
     info!(
-        event_type = %event.type_,
+        event_type = %event.ty(),
         matched = matched.len(),
         "dispatching matched rules"
     );
 
-    let claude_config = state.shared.claude.as_ref();
+    let claude_config = shared.claude.as_ref();
     for rule in &matched {
         info!(rule = %rule.name, action = %rule.action, "executing rule");
         if let Err(e) = actions::dispatch(
             rule,
-            &event,
+            event,
             claude_config,
-            &state.shared,
-            &state.shared.http_client,
+            shared,
+            &shared.http_client,
         )
         .await
         {
-            state.shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
+            shared.stats.actions_failed.fetch_add(1, Ordering::Relaxed);
             error!(rule = %rule.name, error = %e, "action failed");
         } else {
-            state.shared.stats.actions_succeeded.fetch_add(1, Ordering::Relaxed);
+            shared.stats.actions_succeeded.fetch_add(1, Ordering::Relaxed);
         }
     }
-    // Drop the read lock before acquiring the mutex
     drop(rules);
 
     // Record recent event
-    let mut recent = state.shared.recent_events.lock().await;
+    let mut recent = shared.recent_events.lock().await;
     if recent.len() >= MAX_RECENT_EVENTS {
         recent.pop_front();
     }
     recent.push_back(RecentEvent {
-        event_type: event.type_.clone(),
-        source: event.source.clone(),
+        event_type: event.ty().to_string(),
+        source: event.source().to_string(),
         matched_rules: matched_names.clone(),
-        timestamp: event.time,
+        timestamp: event.time().copied().unwrap_or_else(Utc::now),
     });
-    drop(recent);
 
     Ok(axum::Json(json!({"matched_rules": matched_names.len()})))
 }
@@ -382,7 +472,7 @@ fn build_cloud_event(
     webhook: &WebhookConfig,
     headers: &HeaderMap,
     data: serde_json::Value,
-) -> CloudEvent {
+) -> Event {
     // For GitHub, the event type comes from X-GitHub-Event header
     let github_event = headers
         .get("x-github-event")
@@ -411,7 +501,14 @@ fn build_cloud_event(
         .unwrap_or("unknown")
         .to_string();
 
-    CloudEvent::new(type_, source, data)
+    EventBuilderV10::new()
+        .id(uuid::Uuid::new_v4().to_string())
+        .ty(type_)
+        .source(source)
+        .time(Utc::now())
+        .data("application/json", data)
+        .build()
+        .expect("required CloudEvent fields are always set")
 }
 
 #[cfg(test)]

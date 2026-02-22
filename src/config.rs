@@ -19,6 +19,10 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// Shared secret for the /ingest endpoint. Read from this env var at runtime.
+    /// If unset, the /ingest endpoint is disabled entirely.
+    #[serde(default)]
+    pub ingest_secret_env: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -91,6 +95,13 @@ pub struct RuleConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub body_template: Option<String>,
+    /// Target URL for "forward" action — sends the full CloudEvent as JSON.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Shared secret (env var name) the forward action sends as Bearer token.
+    /// The receiving server's /ingest endpoint checks this.
+    #[serde(default)]
+    pub target_secret_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -131,6 +142,7 @@ mod tests {
         let toml = r#"
 [server]
 bind = "127.0.0.1:9000"
+ingest_secret_env = "INGEST_TOKEN"
 
 [claude]
 api_key_env = "MY_KEY"
@@ -148,13 +160,23 @@ name = "Test rule"
 filter = { type_prefix = "com.github.issues" }
 action = "claude"
 prompt = "Hello {{event.data.issue.title}}"
+
+[[rules]]
+name = "Forward to dev"
+filter = { type_prefix = "com.github" }
+action = "forward"
+target = "http://localhost:8091/ingest"
+target_secret_env = "DEV_INGEST_TOKEN"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.bind, "127.0.0.1:9000");
+        assert_eq!(config.server.ingest_secret_env.as_deref(), Some("INGEST_TOKEN"));
         assert_eq!(config.webhooks.len(), 1);
         assert_eq!(config.webhooks[0].id, "gh");
-        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].action, "claude");
+        assert_eq!(config.rules[1].action, "forward");
+        assert_eq!(config.rules[1].target.as_deref(), Some("http://localhost:8091/ingest"));
         let claude = config.claude.unwrap();
         assert_eq!(claude.max_tokens, 2048);
     }

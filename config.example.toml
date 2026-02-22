@@ -1,5 +1,8 @@
 [server]
 bind = "0.0.0.0:8090"
+# Shared secret for the /events CloudEvents receiver (reads from this env var).
+# If unset, /events endpoint is disabled entirely.
+# ingest_secret_env = "NEXUS_EVENTS_SECRET"
 
 [claude]
 api_key_env = "ANTHROPIC_API_KEY"   # reads from this env var at runtime
@@ -81,3 +84,13 @@ Reviewer: {{event.data.review.user.login}}
 State: {{event.data.review.state}}
 Body: {{event.data.review.body}}
 """
+
+# Forward all events to a dev instance for testing.
+# Uses the CloudEvents HTTP Webhook spec — the target's /events endpoint
+# must have ingest_secret_env configured and support the OPTIONS handshake.
+# [[rules]]
+# name = "Forward to dev"
+# filter = { type_prefix = "com.github" }
+# action = "forward"
+# target = "http://dev-machine:8091/events"
+# target_secret_env = "DEV_EVENTS_SECRET"
