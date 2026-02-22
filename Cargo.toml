@@ -39,7 +39,7 @@ jaq-interpret = "1"
 jaq-parse = "1"
 jaq-std = "1"
 dirs = "6.0.0"
-nexus-agent = { path = "../agent" }
+nexus-agent = { git = "https://github.com/imdanibytes/nexus-agent.git" }
 async-trait = "0.1"
 
 [dev-dependencies]

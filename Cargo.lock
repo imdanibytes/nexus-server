@@ -1417,6 +1417,7 @@ dependencies = [
 [[package]]
 name = "nexus-agent"
 version = "0.1.0"
+source = "git+https://github.com/imdanibytes/nexus-agent.git#e6e598a6bd031e507e81331533833af95fc28142"
 dependencies = [
  "async-trait",
  "chrono",
