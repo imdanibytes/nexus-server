@@ -22,6 +22,8 @@ use crate::config::RuleConfig;
 use crate::github_auth::GitHubAppAuth;
 use crate::routing::match_rules;
 use crate::sources::{self, Source};
+use crate::workflows::task::TaskStore;
+use crate::workflows::WorkflowStore;
 
 /// Max webhook request body size (256 KB).
 const MAX_BODY_SIZE: usize = 256 * 1024;
@@ -44,6 +46,8 @@ pub struct SharedState {
     pub stats: ServerStats,
     pub recent_events: Mutex<VecDeque<RecentEvent>>,
     pub seen_deliveries: Mutex<DeliveryTracker>,
+    pub workflow_store: WorkflowStore,
+    pub task_store: TaskStore,
 }
 
 /// Server-wide counters. Atomics — no locks needed for reads.
@@ -159,6 +163,16 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         }
     });
 
+    // Load workflow definitions
+    let mut workflow_store = WorkflowStore::new();
+    for wf_config in &config.workflows {
+        let wf_path = std::path::Path::new(&wf_config.path);
+        match workflow_store.load(&wf_config.name, wf_path) {
+            Ok(()) => info!(name = %wf_config.name, path = %wf_config.path, "loaded workflow"),
+            Err(e) => error!(name = %wf_config.name, error = %e, "failed to load workflow"),
+        }
+    }
+
     let shared = Arc::new(SharedState {
         source_count: config.sources.len(),
         rules: RwLock::new(config.rules),
@@ -170,6 +184,8 @@ pub fn build_router(config: crate::config::Config, config_path: PathBuf) -> Rout
         stats: ServerStats::new(),
         recent_events: Mutex::new(VecDeque::new()),
         seen_deliveries: Mutex::new(DeliveryTracker::new()),
+        workflow_store,
+        task_store: TaskStore::new(),
     });
 
     // Build action registry after shared state — AgentAction needs Arc<SharedState>

@@ -13,6 +13,8 @@ pub struct Config {
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +102,15 @@ pub struct RuleConfig {
     pub target: Option<String>,
     #[serde(default)]
     pub target_secret_env: Option<String>,
+    /// Workflow name to execute (for `action = "workflow"`).
+    #[serde(default)]
+    pub workflow: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkflowConfig {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -186,6 +197,29 @@ target_secret_env = "DEV_EVENTS_TOKEN"
         );
         let claude = config.claude.unwrap();
         assert_eq!(claude.max_tokens, 2048);
+    }
+
+    #[test]
+    fn parse_workflow_config() {
+        let toml = r#"
+[server]
+
+[[workflows]]
+name = "coding-agent"
+path = "workflows/coding-agent.yaml"
+
+[[rules]]
+name = "Issue → workflow"
+filter = { type_prefix = "com.github.issues" }
+action = "workflow"
+workflow = "coding-agent"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.workflows.len(), 1);
+        assert_eq!(config.workflows[0].name, "coding-agent");
+        assert_eq!(config.workflows[0].path, "workflows/coding-agent.yaml");
+        assert_eq!(config.rules[0].action, "workflow");
+        assert_eq!(config.rules[0].workflow.as_deref(), Some("coding-agent"));
     }
 
     #[test]

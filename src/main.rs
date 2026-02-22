@@ -7,6 +7,7 @@ mod routing;
 mod server;
 mod sources;
 mod verification;
+mod workflows;
 
 use clap::Parser;
 use tracing::{info, warn};

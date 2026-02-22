@@ -91,6 +91,27 @@ pub fn definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "name": "list_workflows",
+            "description": "List all loaded workflow definitions.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "list_tasks",
+            "description": "List all workflow task executions with their status.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "get_task",
+            "description": "Get details of a specific workflow task execution.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task ID" }
+                },
+                "required": ["id"]
+            }
+        }),
     ]
 }
 
@@ -107,6 +128,9 @@ pub async fn execute(name: &str, args: &Value, state: &SharedState) -> String {
         "refresh_github_token" => refresh_github_token(state).await,
         "check_update" => check_update(state).await,
         "apply_update" => apply_update(args, state).await,
+        "list_workflows" => list_workflows(state),
+        "list_tasks" => list_tasks(state).await,
+        "get_task" => get_task(args, state).await,
         _ => format!("Unknown tool: {name}"),
     }
 }
@@ -449,6 +473,40 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<bool, String> {
     let hash = hex::encode(Sha256::digest(&data));
     Ok(hash == expected.to_lowercase())
 }
+
+// ---------------------------------------------------------------------------
+// Workflow tools
+// ---------------------------------------------------------------------------
+
+fn list_workflows(state: &SharedState) -> String {
+    let names = state.workflow_store.names();
+    let list: Vec<Value> = names
+        .iter()
+        .map(|name| json!({ "name": name }))
+        .collect();
+    serde_json::to_string_pretty(&list).unwrap_or_default()
+}
+
+async fn list_tasks(state: &SharedState) -> String {
+    let tasks = state.task_store.list().await;
+    serde_json::to_string_pretty(&tasks).unwrap_or_default()
+}
+
+async fn get_task(args: &Value, state: &SharedState) -> String {
+    let id = match args["id"].as_str() {
+        Some(id) => id,
+        None => return "Error: missing 'id' argument".to_string(),
+    };
+
+    match state.task_store.get(id).await {
+        Some(task) => serde_json::to_string_pretty(&task).unwrap_or_default(),
+        None => format!("Task '{id}' not found"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-update internals
+// ---------------------------------------------------------------------------
 
 fn do_reexec() -> ! {
     use std::os::unix::process::CommandExt;

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod claude;
 pub mod forward;
 pub mod http_post;
+pub mod workflow;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,6 +69,10 @@ impl ActionRegistry {
         actions.insert(
             "forward".into(),
             Arc::new(forward::ForwardAction::new(shared.http_client.clone())),
+        );
+        actions.insert(
+            "workflow".into(),
+            Arc::new(workflow::WorkflowAction::new(shared.clone())),
         );
 
         Self { actions }

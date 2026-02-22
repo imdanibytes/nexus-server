@@ -76,6 +76,7 @@ mod tests {
             body_template: None,
             target: None,
             target_secret_env: None,
+            workflow: None,
         }
     }
 
